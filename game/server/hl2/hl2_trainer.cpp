@@ -5,6 +5,7 @@
 //   trainer_infinite_ammo  clips and reserve ammo of carried weapons stay full
 //   trainer_infinite_aux   suit auxiliary power (sprint/flashlight/oxygen) never drains
 //   trainer_multijump      extra jumps while airborne (shared, see gamemovement.cpp)
+//   trainer_onehitkill     anything the player damages dies (see baseentity.cpp)
 // Each has a *_toggle console command that also prints its new state on the
 // HUD, so they can be bound to keys (see cfg/trainer.cfg).
 //
@@ -64,15 +65,21 @@ CON_COMMAND( trainer_jump_toggle, "Trainer: toggle multi-jump (unlimited air jum
 	Trainer_Announce( UTIL_GetCommandClient(), bOn ? "MULTI-JUMP: ON" : "MULTI-JUMP: OFF" );
 }
 
+CON_COMMAND( trainer_kill_toggle, "Trainer: toggle one-hit kill" )
+{
+	Trainer_Toggle( trainer_onehitkill, "ONE-HIT KILL" );
+}
+
 CON_COMMAND( trainer_status, "Trainer: show the state of every trainer option" )
 {
 	int nJumps = trainer_multijump.GetInt();
-	char szText[160];
-	Q_snprintf( szText, sizeof( szText ), "God %s | Ammo %s | Aux %s | Multi-jump %s",
+	char szText[224];
+	Q_snprintf( szText, sizeof( szText ), "God %s | Ammo %s | Aux %s | Multi-jump %s | 1-hit kill %s",
 		trainer_god.GetBool() ? "ON" : "off",
 		trainer_infinite_ammo.GetBool() ? "ON" : "off",
 		trainer_infinite_aux.GetBool() ? "ON" : "off",
-		nJumps == 0 ? "off" : ( nJumps < 0 ? "ON (unlimited)" : "ON" ) );
+		nJumps == 0 ? "off" : ( nJumps < 0 ? "ON (unlimited)" : "ON" ),
+		trainer_onehitkill.GetBool() ? "ON" : "off" );
 	Trainer_Announce( UTIL_GetCommandClient(), szText );
 }
 

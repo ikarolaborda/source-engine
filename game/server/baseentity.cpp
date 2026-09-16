@@ -97,6 +97,14 @@ bool CBaseEntity::s_bAbsQueriesValid = true;
 
 ConVar sv_netvisdist( "sv_netvisdist", "10000", FCVAR_CHEAT | FCVAR_DEVELOPMENTONLY, "Test networking visibility distance" );
 
+#ifdef HL2_DLL
+// Trainer: see game/server/hl2/hl2_trainer.cpp for the rest of the trainer.
+// This one lives here because CBaseEntity::TakeDamage() below is the single
+// path every bullet, melee swing, grenade and thrown physics object goes
+// through, so hooking it is what makes the toggle cover all of them.
+ConVar trainer_onehitkill( "trainer_onehitkill", "0", FCVAR_NONE, "Trainer: 1 = anything the player damages dies in one hit" );
+#endif
+
 // This table encodes edict data.
 void SendProxy_AnimTime( const SendProp *pProp, const void *pStruct, const void *pVarData, DVariant *pOut, int iElement, int objectID )
 {
@@ -1497,6 +1505,19 @@ void CBaseEntity::TakeDamage( const CTakeDamageInfo &inputInfo )
 
 		// Scale the damage by my own modifiers
 		info.ScaleDamage( GetReceivedDamageScale( info.GetAttacker() ) );
+
+#ifdef HL2_DLL
+		// Trainer one-hit kill. Done after the scaling above so nothing can
+		// shrink it again, and skipped for the player so their own grenade
+		// splash doesn't kill them. Enemies that reject damage by type rather
+		// than by amount (gunship, strider) are unaffected -- they never reach
+		// the point where this number is subtracted from their health.
+		if ( trainer_onehitkill.GetBool() && !IsPlayer() &&
+			 info.GetAttacker() && info.GetAttacker()->IsPlayer() )
+		{
+			info.SetDamage( (float)GetHealth() + 1000.0f );
+		}
+#endif
 
 		//Msg("%s took %.2f Damage, at %.2f\n", GetClassname(), info.GetDamage(), gpGlobals->curtime );
 
