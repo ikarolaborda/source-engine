@@ -48,6 +48,9 @@ ConVar xc_uncrouch_on_jump( "xc_uncrouch_on_jump", "1", FCVAR_ARCHIVE, "Uncrouch
 
 #if defined( HL2_DLL ) || defined( HL2_CLIENT_DLL )
 ConVar player_limit_jump_speed( "player_limit_jump_speed", "1", FCVAR_REPLICATED );
+
+// Trainer: extra jumps allowed while airborne (0 = off, -1 = unlimited). Shared so prediction matches.
+ConVar trainer_multijump( "trainer_multijump", "0", FCVAR_REPLICATED, "Trainer: extra mid-air jumps allowed (0 = off, -1 = unlimited)" );
 #endif
 
 // option_duck_method is a carrier convar. Its sole purpose is to serve an easy-to-flip
@@ -2029,6 +2032,12 @@ void CGameMovement::FullWalkMove( )
 		StartGravity();
 	}
 
+	// Trainer multi-jump: touching the ground restores the air jumps.
+	if ( player->GetGroundEntity() != NULL )
+	{
+		player->m_Local.m_nTrainerAirJumps = 0;
+	}
+
 	// If we are leaping out of the water, just update the counters.
 	if (player->m_flWaterJumpTime)
 	{
@@ -2392,10 +2401,27 @@ bool CGameMovement::CheckJumpButton( void )
 	}
 
 	// No more effect
- 	if (player->GetGroundEntity() == NULL)
+	bool bTrainerAirJump = false;
+	if (player->GetGroundEntity() == NULL)
 	{
-		mv->m_nOldButtons |= IN_JUMP;
-		return false;		// in air, so no effect
+		// Trainer multi-jump: allow extra jumps while airborne once the jump key has been released.
+		int nExtraJumps = trainer_multijump.GetInt();
+		if ( nExtraJumps != 0 && !( mv->m_nOldButtons & IN_JUMP ) &&
+			 ( nExtraJumps < 0 || player->m_Local.m_nTrainerAirJumps < nExtraJumps ) )
+		{
+			bTrainerAirJump = true;
+			if ( nExtraJumps > 0 && player->m_Local.m_nTrainerAirJumps < 255 )
+				player->m_Local.m_nTrainerAirJumps++;
+		}
+		else
+		{
+			mv->m_nOldButtons |= IN_JUMP;
+			return false;		// in air, so no effect
+		}
+	}
+	else
+	{
+		player->m_Local.m_nTrainerAirJumps = 0;
 	}
 
 	// Don't allow jumping when the player is in a stasis field.
@@ -2449,7 +2475,8 @@ bool CGameMovement::CheckJumpButton( void )
 	// Acclerate upward
 	// If we are ducking...
 	float startz = mv->m_vecVelocity[2];
-	if ( (  player->m_Local.m_bDucking ) || (  player->GetFlags() & FL_DUCKING ) )
+	// An air jump replaces the vertical velocity instead of adding to it, so it works while falling.
+	if ( bTrainerAirJump || (  player->m_Local.m_bDucking ) || (  player->GetFlags() & FL_DUCKING ) )
 	{
 		// d = 0.5 * g * t^2		- distance traveled with linear accel
 		// t = sqrt(2.0 * 45 / g)	- how long to fall 45 units

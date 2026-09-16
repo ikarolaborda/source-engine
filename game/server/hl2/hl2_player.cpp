@@ -6,6 +6,7 @@
 
 #include "cbase.h"
 #include "hl2_player.h"
+#include "hl2_trainer.h"
 #include "globalstate.h"
 #include "game.h"
 #include "gamerules.h"
@@ -897,6 +898,8 @@ void CHL2_Player::PreThink(void)
 void CHL2_Player::PostThink( void )
 {
 	BaseClass::PostThink();
+
+	Trainer_PlayerPostThink( this );
 
 	if ( !g_fGameOver && !IsPlayerLockedInPlace() && IsAlive() )
 	{
@@ -1866,7 +1869,7 @@ void CHL2_Player::SuitPower_Initialize( void )
 bool CHL2_Player::SuitPower_Drain( float flPower )
 {
 	// Suitpower cheat on?
-	if ( sv_infinite_aux_power.GetBool() )
+	if ( sv_infinite_aux_power.GetBool() || trainer_infinite_aux.GetBool() )
 		return true;
 
 	m_HL2Local.m_flSuitPower -= flPower;
@@ -2288,6 +2291,10 @@ ConVar test_massive_dmg_clip("test_massive_dmg_clip", "0.5" );
 int	CHL2_Player::OnTakeDamage( const CTakeDamageInfo &info )
 {
 	if ( GlobalEntity_GetState( "gordon_invulnerable" ) == GLOBAL_ON )
+		return 0;
+
+	// Trainer god mode
+	if ( trainer_god.GetBool() )
 		return 0;
 
 	// ignore fall damage if instructed to do so by input
@@ -3247,7 +3254,7 @@ void CHL2_Player::UpdateClientData( void )
 #ifdef HL2_EPISODIC
 	if ( Flashlight_UseLegacyVersion() == false )
 	{
-		if ( FlashlightIsOn() && sv_infinite_aux_power.GetBool() == false )
+		if ( FlashlightIsOn() && sv_infinite_aux_power.GetBool() == false && trainer_infinite_aux.GetBool() == false )
 		{
 			m_HL2Local.m_flFlashBattery -= FLASH_DRAIN_TIME * gpGlobals->frametime;
 			if ( m_HL2Local.m_flFlashBattery < 0.0f )

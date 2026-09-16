@@ -33,6 +33,7 @@ public:
 		m_iv_vecPunchAngle.Setup( &m_vecPunchAngle.m_Value, LATCH_SIMULATION_VAR );
 		m_iv_vecPunchAngleVel.Setup( &m_vecPunchAngleVel.m_Value, LATCH_SIMULATION_VAR );
 		m_flFOVRate = 0;
+		m_nTrainerAirJumps = 0;
 	}
 
 	unsigned char			m_chAreaBits[MAX_AREA_STATE_BYTES];				// Area visibility flags.
@@ -49,6 +50,7 @@ public:
 	float					m_flDucktime;
 	float					m_flDuckJumpTime;
 	float					m_flJumpTime;
+	int						m_nTrainerAirJumps;
 	int						m_nStepside;
 	float					m_flFallVelocity;
 	int						m_nOldButtons;

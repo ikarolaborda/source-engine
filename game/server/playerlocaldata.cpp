@@ -33,6 +33,7 @@ BEGIN_SEND_TABLE_NOBASE( CPlayerLocalData, DT_Local )
 	SendPropFloat	(SENDINFO(m_flDucktime), 12, SPROP_ROUNDDOWN|SPROP_CHANGES_OFTEN, 0.0f, 2048.0f ),
 	SendPropFloat	(SENDINFO(m_flDuckJumpTime), 12, SPROP_ROUNDDOWN, 0.0f, 2048.0f ),
 	SendPropFloat	(SENDINFO(m_flJumpTime), 12, SPROP_ROUNDDOWN, 0.0f, 2048.0f ),
+	SendPropInt		(SENDINFO(m_nTrainerAirJumps), 8, SPROP_UNSIGNED ),
 #if PREDICTION_ERROR_CHECK_LEVEL > 1 
 	SendPropFloat	(SENDINFO(m_flFallVelocity), 32, SPROP_NOSCALE ),
 
@@ -145,6 +146,7 @@ BEGIN_SIMPLE_DATADESC( CPlayerLocalData )
 	DEFINE_FIELD( m_flDucktime, FIELD_TIME ),
 	DEFINE_FIELD( m_flDuckJumpTime, FIELD_TIME ),
 	DEFINE_FIELD( m_flJumpTime, FIELD_TIME ),
+	DEFINE_FIELD( m_nTrainerAirJumps, FIELD_INTEGER ),
 	DEFINE_FIELD( m_nStepside, FIELD_INTEGER ),
 	DEFINE_FIELD( m_flFallVelocity, FIELD_FLOAT ),
 	DEFINE_FIELD( m_nOldButtons, FIELD_INTEGER ),
@@ -185,6 +187,7 @@ CPlayerLocalData::CPlayerLocalData()
 	m_audio.ent.Set( NULL );
 	m_pOldSkyCamera = NULL;
 	m_bDrawViewmodel = true;
+	m_nTrainerAirJumps = 0;
 }
 
 
