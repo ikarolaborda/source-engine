@@ -1,0 +1,11 @@
+[package]
+name = "source-host"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file = "../../../LICENSE"
+
+[dependencies]
+
+[lints]
+workspace = true

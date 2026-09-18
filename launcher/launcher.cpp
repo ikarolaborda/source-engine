@@ -57,6 +57,10 @@
 #include "tier1/fmtstr.h"
 #include "sourcevr/isourcevirtualreality.h"
 
+#if defined( SOURCE_RUST_ENGINE )
+#include "rust_engine_bridge.h"
+#endif
+
 #define VERSION_SAFE_STEAM_API_INTERFACES
 #include "steam/steam_api.h"
 
@@ -196,6 +200,16 @@ SpewRetval_t LauncherDefaultSpewFunc( SpewType_t spewType, char const *pMsg )
 	_exit( 1 );
 #endif
 }
+
+#if defined( SOURCE_RUST_ENGINE )
+static void LauncherRustLog( void *, int32_t level, SourceAbiSlice message )
+{
+	const uint64_t maxPrintable = 0x7fffffffULL;
+	const int length = static_cast<int>( message.length < maxPrintable ? message.length : maxPrintable );
+	const char *text = message.data ? reinterpret_cast<const char *>( message.data ) : "";
+	Msg( "[rust:%d] %.*s\n", static_cast<int>( level ), length, text );
+}
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -906,6 +920,18 @@ const char *CSourceAppSystemGroup::DetermineDefaultGame()
 
 int MessageBox( HWND hWnd, const char *message, const char *header, unsigned uType )
 {
+	// A modal box waits for a click, and an unattended run has nobody to
+	// click it.  Every startup error reaches here, so without this an
+	// automated run reports a hang whatever actually went wrong, and the
+	// reason for it never reaches the log.  With -nomessagebox the reason
+	// goes to stderr and the process carries on to its real outcome.
+	if ( CommandLine()->CheckParm( "-nomessagebox" ) )
+	{
+		fprintf( stderr, "%s: %s\n", header ? header : "Error", message ? message : "" );
+		fflush( stderr );
+		return 0;
+	}
+
 	SDL_ShowSimpleMessageBox( 0, header, message, GetAssertDialogParent() );
 	return 0;
 }
@@ -1191,6 +1217,57 @@ static const char *BuildCommand()
 
 extern void InitGL4ES();
 
+static bool LauncherRunLegacySessionOnce()
+{
+	bool bRestart = false;
+	CSourceAppSystemGroup sourceSystems;
+	CSteamApplication steamApplication( &sourceSystems );
+	int nRetval = steamApplication.Run();
+	if ( steamApplication.GetErrorStage() == CSourceAppSystemGroup::INITIALIZATION )
+	{
+		bRestart = (nRetval == INIT_RESTART);
+	}
+	else if ( nRetval == RUN_RESTART )
+	{
+		bRestart = true;
+	}
+
+	bool bReslistCycle = false;
+	if ( !bRestart )
+	{
+		bReslistCycle = reslistgenerator->ShouldContinue();
+		bRestart = bReslistCycle;
+	}
+
+	if ( !bReslistCycle )
+	{
+		// Remove any overrides in case settings changed
+		CommandLine()->RemoveParm( "-w" );
+		CommandLine()->RemoveParm( "-h" );
+		CommandLine()->RemoveParm( "-width" );
+		CommandLine()->RemoveParm( "-height" );
+		CommandLine()->RemoveParm( "-sw" );
+		CommandLine()->RemoveParm( "-startwindowed" );
+		CommandLine()->RemoveParm( "-windowed" );
+		CommandLine()->RemoveParm( "-window" );
+		CommandLine()->RemoveParm( "-full" );
+		CommandLine()->RemoveParm( "-fullscreen" );
+		CommandLine()->RemoveParm( "-dxlevel" );
+		CommandLine()->RemoveParm( "-autoconfig" );
+		CommandLine()->RemoveParm( "+mat_hdr_level" );
+	}
+	return bRestart;
+}
+
+#if defined( SOURCE_RUST_ENGINE )
+static int32_t LauncherRunLegacySession( void * )
+{
+	return LauncherRunLegacySessionOnce()
+		? SOURCE_HOST_SESSION_RESTART
+		: SOURCE_HOST_SESSION_STOP;
+}
+#endif
+
 //-----------------------------------------------------------------------------
 // Purpose: The real entry point for the application
 // Input  : hInstance - 
@@ -1254,6 +1331,68 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 	// Hook the debug output stuff.
 	SpewOutputFunc( LauncherDefaultSpewFunc );
 
+#if defined( SOURCE_RUST_ENGINE )
+	CRustEngineBridge rustEngine;
+	SourceAbiStatus rustStatus = rustEngine.Init( LauncherRustLog, NULL );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust engine context initialization failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustStatus = source_rust_bridge_activate( rustEngine.Handle() );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust engine context activation failed with status %d\n", rustStatus );
+		return -1;
+	}
+	static const char rustBackendCvar[] = "rust_engine_backend";
+	static const char rustBackendValue[] = "active";
+	rustStatus = rustEngine.CvarRegister( rustBackendCvar, sizeof( rustBackendCvar ) - 1,
+		rustBackendValue, sizeof( rustBackendValue ) - 1, SOURCE_CVAR_READ_ONLY );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust console variable registration failed with status %d\n", rustStatus );
+		return -1;
+	}
+	char rustBackendReadback[16];
+	uint64_t rustBackendBytes = 0;
+	SourceAbiCvarInfo rustBackendInfo = {};
+	rustStatus = rustEngine.CvarGet( rustBackendCvar, sizeof( rustBackendCvar ) - 1,
+		rustBackendReadback, sizeof( rustBackendReadback ) - 1, &rustBackendBytes,
+		&rustBackendInfo );
+	if ( rustStatus != SOURCE_ABI_OK || rustBackendBytes >= sizeof( rustBackendReadback ) )
+	{
+		Warning( "Rust console variable read failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustBackendReadback[rustBackendBytes] = '\0';
+	Msg( "Rust console state: %s generation %llu\n", rustBackendReadback,
+		static_cast<unsigned long long>( rustBackendInfo.generation ) );
+	static const char rustStartupCommand[] = "echo RUST_COMMAND_QUEUE_ACTIVE";
+	uint32_t rustStartupCommandCount = 0;
+	rustStatus = rustEngine.CommandEnqueue( rustStartupCommand,
+		sizeof( rustStartupCommand ) - 1, &rustStartupCommandCount );
+	if ( rustStatus != SOURCE_ABI_OK || rustStartupCommandCount != 1 )
+	{
+		Warning( "Rust startup command queue failed with status %d\n", rustStatus );
+		return -1;
+	}
+	static const char rustReady[] = "launcher context initialized";
+	rustStatus = rustEngine.EmitLog( 1, rustReady, sizeof( rustReady ) - 1 );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust engine diagnostic failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustStatus = rustEngine.HostTransition( SOURCE_HOST_LAUNCHER_READY );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host launcher transition failed with status %d\n", rustStatus );
+		return -1;
+	}
+	Msg( "Rust host phase: launcher ready\n" );
+#endif
+
 	// Quickly check the hardware key, essentially a warning shot.  
 	if ( !Plat_VerifyHardwareKeyPrompt() )
 	{
@@ -1284,6 +1423,220 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 	
 	// Figure out the directory the executable is running from
 	UTIL_ComputeBaseDir();
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !GetBaseDirectory()[0] )
+	{
+		uint64_t rustBaseDirectoryBytes = 0;
+		rustStatus = rustEngine.ExecutableBase( g_szBasedir, sizeof( g_szBasedir ) - 1,
+			&rustBaseDirectoryBytes );
+		if ( rustStatus != SOURCE_ABI_OK || rustBaseDirectoryBytes >= sizeof( g_szBasedir ) )
+		{
+			Warning( "Rust executable base resolution failed with status %d\n", rustStatus );
+			return -1;
+		}
+		g_szBasedir[rustBaseDirectoryBytes] = '\0';
+		Msg( "Rust executable base: %s\n", g_szBasedir );
+	}
+
+	static const char rustGamePathId[] = "GAME";
+	static const char rustHl2VirtualPath[] = "hl2";
+	char rustHl2Path[MAX_PATH];
+	uint64_t rustHl2PathBytes = 0;
+	rustStatus = rustEngine.ResolveContentPath( GetBaseDirectory(), Q_strlen( GetBaseDirectory() ),
+		rustHl2VirtualPath, sizeof( rustHl2VirtualPath ) - 1, rustHl2Path,
+		sizeof( rustHl2Path ) - 1, &rustHl2PathBytes );
+	if ( rustStatus != SOURCE_ABI_OK || rustHl2PathBytes >= sizeof( rustHl2Path ) )
+	{
+		Warning( "Rust game path resolution failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustHl2Path[rustHl2PathBytes] = '\0';
+	rustStatus = rustEngine.MountDirectory( rustHl2Path, rustHl2PathBytes,
+		rustGamePathId, sizeof( rustGamePathId ) - 1, true );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust loose content mount skipped for %s (status %d)\n",
+			rustHl2Path, rustStatus );
+	}
+	const char *rustExternalContentRoot = getenv( "SOURCE_HL2_CONTENT_ROOT" );
+	if ( rustExternalContentRoot && rustExternalContentRoot[0] )
+	{
+		char rustExternalHl2Path[MAX_PATH];
+		uint64_t rustExternalHl2PathBytes = 0;
+		rustStatus = rustEngine.ResolveContentPath( rustExternalContentRoot,
+			Q_strlen( rustExternalContentRoot ), rustHl2VirtualPath,
+			sizeof( rustHl2VirtualPath ) - 1, rustExternalHl2Path,
+			sizeof( rustExternalHl2Path ) - 1, &rustExternalHl2PathBytes );
+		if ( rustStatus != SOURCE_ABI_OK || rustExternalHl2PathBytes >= sizeof( rustExternalHl2Path ) )
+		{
+			Warning( "Rust external content path resolution failed with status %d\n", rustStatus );
+			return -1;
+		}
+		rustExternalHl2Path[rustExternalHl2PathBytes] = '\0';
+		rustStatus = rustEngine.MountDirectory( rustExternalHl2Path,
+			rustExternalHl2PathBytes, rustGamePathId, sizeof( rustGamePathId ) - 1, true );
+		if ( rustStatus != SOURCE_ABI_OK )
+		{
+			Warning( "Rust external content mount failed for %s (status %d)\n",
+				rustExternalHl2Path, rustStatus );
+			return -1;
+		}
+		Msg( "Rust external content root: %s\n", rustExternalHl2Path );
+	}
+
+	// gameinfo.txt searches the base-HL2 VPKs before its loose directories.
+	// Insert these from lowest to highest priority at the head so Rust observes
+	// the same ordering, including valid packed models ahead of zero-byte loose
+	// placeholders present in the shipped macOS corpus.
+	static const char *rustGameVpks[] =
+	{
+		"hl2/hl2_misc_dir.vpk",
+		"hl2/hl2_sound_misc_dir.vpk",
+		"hl2/hl2_textures_dir.vpk",
+		"hl2/hl2_pak_dir.vpk",
+		"hl2/hl2_sound_vo_english_dir.vpk"
+	};
+	uint32_t rustMountedGameVpks = 0;
+	for ( int rustVpkIndex = 0; rustVpkIndex < ARRAYSIZE( rustGameVpks ); ++rustVpkIndex )
+	{
+		char rustGameVpkPath[MAX_PATH];
+		uint64_t rustGameVpkPathBytes = 0;
+		rustStatus = rustEngine.ResolveContentPath( GetBaseDirectory(),
+			Q_strlen( GetBaseDirectory() ), rustGameVpks[rustVpkIndex],
+			Q_strlen( rustGameVpks[rustVpkIndex] ), rustGameVpkPath,
+			sizeof( rustGameVpkPath ) - 1, &rustGameVpkPathBytes );
+		if ( rustStatus != SOURCE_ABI_OK ||
+			rustGameVpkPathBytes >= sizeof( rustGameVpkPath ) )
+		{
+			Warning( "Rust GAME VPK path resolution skipped for %s (status %d)\n",
+				rustGameVpks[rustVpkIndex], rustStatus );
+			continue;
+		}
+		rustGameVpkPath[rustGameVpkPathBytes] = '\0';
+		rustStatus = rustEngine.MountVpk( rustGameVpkPath, rustGameVpkPathBytes,
+			rustGamePathId, sizeof( rustGamePathId ) - 1, true );
+		if ( rustStatus == SOURCE_ABI_OK )
+		{
+			++rustMountedGameVpks;
+		}
+		else
+		{
+			Warning( "Rust GAME VPK mount skipped for %s (status %d)\n",
+				rustGameVpkPath, rustStatus );
+		}
+	}
+	Msg( "Rust GAME search mounts: %u VPKs before loose content\n",
+		rustMountedGameVpks );
+
+	char rustVpkPath[MAX_PATH];
+	static const char rustVpkVirtualPath[] = "hl2/hl2_misc_dir.vpk";
+	uint64_t rustVpkPathBytes = 0;
+	rustStatus = rustEngine.ResolveContentPath( GetBaseDirectory(), Q_strlen( GetBaseDirectory() ),
+		rustVpkVirtualPath, sizeof( rustVpkVirtualPath ) - 1, rustVpkPath,
+		sizeof( rustVpkPath ) - 1, &rustVpkPathBytes );
+	if ( rustStatus != SOURCE_ABI_OK || rustVpkPathBytes >= sizeof( rustVpkPath ) )
+	{
+		Warning( "Rust content path resolution failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustVpkPath[rustVpkPathBytes] = '\0';
+	uint64_t rustVpkEntryCount = 0;
+	uint32_t rustVpkVersion = 0;
+	rustStatus = rustEngine.ProbeVpk( rustVpkPath, Q_strlen( rustVpkPath ),
+		&rustVpkEntryCount, &rustVpkVersion );
+	if ( rustStatus == SOURCE_ABI_OK )
+	{
+		Msg( "Rust VPK probe: version %u, %llu entries (%s)\n",
+			rustVpkVersion,
+			static_cast<unsigned long long>( rustVpkEntryCount ),
+			rustVpkPath );
+		static const char rustVpkEntry[] = "cfg/valve.rc";
+		char rustVpkContents[1024];
+		uint64_t rustVpkBytes = 0;
+		rustStatus = rustEngine.ReadFile( rustVpkEntry, sizeof( rustVpkEntry ) - 1,
+			rustGamePathId, sizeof( rustGamePathId ) - 1, rustVpkContents,
+			sizeof( rustVpkContents ), &rustVpkBytes );
+		if ( rustStatus == SOURCE_ABI_OK )
+		{
+			Msg( "Rust VPK read: CRC-validated %llu bytes from %s\n",
+				static_cast<unsigned long long>( rustVpkBytes ), rustVpkEntry );
+		}
+		else
+		{
+			Warning( "Rust VPK read failed for %s (status %d)\n", rustVpkEntry, rustStatus );
+		}
+	}
+	else
+	{
+		Warning( "Rust VPK probe skipped for %s (status %d)\n", rustVpkPath, rustStatus );
+	}
+
+	char rustSceneVpkPath[MAX_PATH];
+	static const char rustSceneVpkVirtualPath[] = "hl2/hl2_pak_dir.vpk";
+	uint64_t rustSceneVpkPathBytes = 0;
+	rustStatus = rustEngine.ResolveContentPath( GetBaseDirectory(), Q_strlen( GetBaseDirectory() ),
+		rustSceneVpkVirtualPath, sizeof( rustSceneVpkVirtualPath ) - 1, rustSceneVpkPath,
+		sizeof( rustSceneVpkPath ) - 1, &rustSceneVpkPathBytes );
+	if ( rustStatus != SOURCE_ABI_OK || rustSceneVpkPathBytes >= sizeof( rustSceneVpkPath ) )
+	{
+		Warning( "Rust scene path resolution failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustSceneVpkPath[rustSceneVpkPathBytes] = '\0';
+	static const char rustSceneEntry[] = "scenes/scenes.image";
+	uint64_t rustSceneCount = 0;
+	uint64_t rustSceneStringCount = 0;
+	rustStatus = rustEngine.ProbeScene( rustSceneEntry, sizeof( rustSceneEntry ) - 1,
+		rustGamePathId, sizeof( rustGamePathId ) - 1,
+		&rustSceneCount, &rustSceneStringCount );
+	if ( rustStatus == SOURCE_ABI_OK )
+	{
+		Msg( "Rust scene cache: %llu scenes, %llu sound strings (%s)\n",
+			static_cast<unsigned long long>( rustSceneCount ),
+			static_cast<unsigned long long>( rustSceneStringCount ), rustSceneVpkPath );
+	}
+	else
+	{
+		Warning( "Rust scene cache probe skipped for %s (status %d)\n",
+			rustSceneVpkPath, rustStatus );
+	}
+	const char *rustStartupMap = NULL;
+	if ( CommandLine()->CheckParm( "+map", &rustStartupMap ) && rustStartupMap && rustStartupMap[0] )
+	{
+		char rustMapPath[MAX_PATH];
+		Q_snprintf( rustMapPath, sizeof( rustMapPath ), "maps/%s.bsp", rustStartupMap );
+		SourceAbiWorldInfo rustWorldInfo = {};
+		rustStatus = rustEngine.WorldLoad( rustMapPath, Q_strlen( rustMapPath ),
+			rustGamePathId, sizeof( rustGamePathId ) - 1, &rustWorldInfo );
+		if ( rustStatus != SOURCE_ABI_OK )
+		{
+			Warning( "Rust BSP world load failed for %s (status %d)\n", rustMapPath, rustStatus );
+			return -1;
+		}
+		SourceAbiWorldLeaf rustWorldLeaf = {};
+		rustStatus = rustEngine.WorldPointLeaf( 0.0f, 0.0f, 0.0f, &rustWorldLeaf );
+		if ( rustStatus != SOURCE_ABI_OK )
+		{
+			Warning( "Rust BSP point query failed for %s (status %d)\n", rustMapPath, rustStatus );
+			return -1;
+		}
+		Msg( "Rust BSP world: %llu planes, %llu nodes, %llu leaves, %llu clusters; origin leaf %llu cluster %d (%s)\n",
+			static_cast<unsigned long long>( rustWorldInfo.plane_count ),
+			static_cast<unsigned long long>( rustWorldInfo.node_count ),
+			static_cast<unsigned long long>( rustWorldInfo.leaf_count ),
+			static_cast<unsigned long long>( rustWorldInfo.cluster_count ),
+			static_cast<unsigned long long>( rustWorldLeaf.leaf_index ),
+			rustWorldLeaf.cluster, rustMapPath );
+	}
+	rustStatus = rustEngine.HostTransition( SOURCE_HOST_CONTENT_READY );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host content transition failed with status %d\n", rustStatus );
+		return -1;
+	}
+	Msg( "Rust host phase: content ready\n" );
+#endif
 
 	// Allow the user to explicitly say they want to be able to run multiple instances of the source mutex.
 	// Useful for side-by-side comparisons of different renderers.
@@ -1483,48 +1836,47 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 
 	g_LeakDump.m_bCheckLeaks = CommandLine()->CheckParm( "-leakcheck" ) ? true : false;
 
-	bool bRestart = true;
-	while ( bRestart )
+#if defined( SOURCE_RUST_ENGINE )
+	rustStatus = rustEngine.HostTransition( SOURCE_HOST_LEGACY_RUNNING );
+	if ( rustStatus != SOURCE_ABI_OK )
 	{
-		bRestart = false;
-
-		CSourceAppSystemGroup sourceSystems;
-		CSteamApplication steamApplication( &sourceSystems );
-		int nRetval = steamApplication.Run();
-		if ( steamApplication.GetErrorStage() == CSourceAppSystemGroup::INITIALIZATION )
-		{
-			bRestart = (nRetval == INIT_RESTART);
-		}
-		else if ( nRetval == RUN_RESTART )
-		{
-			bRestart = true;
-		}
-
-		bool bReslistCycle = false;
-		if ( !bRestart )
-		{
-			bReslistCycle = reslistgenerator->ShouldContinue();
-			bRestart = bReslistCycle;
-		}
-		
-		if ( !bReslistCycle )
-		{
-			// Remove any overrides in case settings changed
-			CommandLine()->RemoveParm( "-w" );
-			CommandLine()->RemoveParm( "-h" );
-			CommandLine()->RemoveParm( "-width" );
-			CommandLine()->RemoveParm( "-height" );
-			CommandLine()->RemoveParm( "-sw" );
-			CommandLine()->RemoveParm( "-startwindowed" );
-			CommandLine()->RemoveParm( "-windowed" );
-			CommandLine()->RemoveParm( "-window" );
-			CommandLine()->RemoveParm( "-full" );
-			CommandLine()->RemoveParm( "-fullscreen" );
-			CommandLine()->RemoveParm( "-dxlevel" );
-			CommandLine()->RemoveParm( "-autoconfig" );
-			CommandLine()->RemoveParm( "+mat_hdr_level" );
-		}
+		Warning( "Rust host legacy-loop transition failed with status %d\n", rustStatus );
+		return -1;
 	}
+	Msg( "Rust host phase: legacy engine running\n" );
+#endif
+
+#if defined( SOURCE_RUST_ENGINE )
+	uint32_t rustSessionCount = 0;
+	rustStatus = rustEngine.HostRunSessions( LauncherRunLegacySession, NULL, 1024,
+		&rustSessionCount );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host session loop failed with status %d\n", rustStatus );
+		return -1;
+	}
+	Msg( "Rust host sessions: %u\n", rustSessionCount );
+#else
+	while ( LauncherRunLegacySessionOnce() )
+	{
+	}
+#endif
+
+#if defined( SOURCE_RUST_ENGINE )
+	rustStatus = rustEngine.WorldClear();
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust BSP world cleanup failed with status %d\n", rustStatus );
+		return -1;
+	}
+	rustStatus = rustEngine.HostTransition( SOURCE_HOST_SHUTTING_DOWN );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host shutdown transition failed with status %d\n", rustStatus );
+		return -1;
+	}
+	Msg( "Rust host phase: shutting down\n" );
+#endif
 
 #ifdef WIN32
 	if ( IsPC() )
@@ -1591,6 +1943,16 @@ DLL_EXPORT int LauncherMain( int argc, char **argv )
 #elif defined( _X360 )
 #else
 #error
+#endif
+
+#if defined( SOURCE_RUST_ENGINE )
+	rustStatus = rustEngine.HostTransition( SOURCE_HOST_STOPPED );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host stopped transition failed with status %d\n", rustStatus );
+		return -1;
+	}
+	Msg( "Rust host phase: stopped\n" );
 #endif
 
 	return 0;

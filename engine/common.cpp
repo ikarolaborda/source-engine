@@ -45,6 +45,10 @@
 #include "tier1/lzss.h"
 #include "tier1/snappy.h"
 
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1330,6 +1334,29 @@ bool COM_BufferToBufferCompress_LZSS( void *dest, unsigned int *destLen, const v
 	Assert( destLen );
 	Assert( source );
 
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust owns the codec. Its output is byte-identical to the native
+	// encoder's, including which input it declines as not worth compressing,
+	// so a buffer written here reads back the same either way; the LZSS
+	// differential gate is what holds that true. The native encoder never
+	// writes more than the input it was given, and Rust matches it byte for
+	// byte, so the caller's buffer is as adequate for one as the other.
+	{
+		uint64_t nCompressedLength = 0;
+		const SourceAbiStatus status = source_rust_bridge_lzss_compress( source, sourceLen,
+			SOURCE_ABI_LZSS_DEFAULT_WINDOW, dest, sourceLen, &nCompressedLength );
+		if ( status == SOURCE_ABI_OK )
+		{
+			*destLen = (unsigned int)nCompressedLength;
+			return true;
+		}
+		// Declining means compression would not have helped, which is the
+		// same answer the native encoder gives by returning null.
+		if ( status == SOURCE_ABI_DECLINED )
+			return false;
+	}
+#endif
+
 	CLZSS s;
 	unsigned int uCompressedLen = 0;
 	if ( !s.CompressNoAlloc( (const byte *)source, sourceLen, (unsigned char *)dest, &uCompressedLen ) )
@@ -1378,6 +1405,29 @@ bool COM_BufferToBufferDecompress( void *dest, unsigned int *destLen, const void
 		const lzss_header_t *pHeader = (const lzss_header_t *)source;
 		if ( pHeader->id == LZSS_ID )
 		{
+#if defined( SOURCE_RUST_ENGINE )
+			// Rust checks every back-reference against what it has actually
+			// decoded, so a corrupt stream is refused rather than read out of
+			// bounds.
+			uint64_t nRustDecompressed = 0;
+			const SourceAbiStatus status = source_rust_bridge_lzss_decompress( source,
+				sourceLen, dest, *destLen, &nRustDecompressed );
+			if ( status == SOURCE_ABI_OK )
+			{
+				if ( (int)nRustDecompressed != nDecompressedSize )
+				{
+					Warning( "NET_BufferToBufferDecompress: header said %d bytes would be decompressed, but we LZSS decompressed %d\n", nDecompressedSize, (int)nRustDecompressed );
+					return false;
+				}
+				*destLen = nDecompressedSize;
+				return true;
+			}
+			if ( status == SOURCE_ABI_FORMAT_ERROR )
+			{
+				Warning( "NET_BufferToBufferDecompress: the LZSS stream did not decode\n" );
+				return false;
+			}
+#endif
 			CLZSS s;
 			int nActualDecompressedSize = s.SafeUncompress( (byte *)source, sourceLen, (byte *)dest, *destLen );
 			if ( nActualDecompressedSize != nDecompressedSize )

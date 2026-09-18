@@ -67,6 +67,7 @@ extern ConVar dsp_water;
 extern ConVar dsp_player;
 extern ConVar dsp_facingaway;
 extern ConVar snd_showstart;
+extern ConVar snd_validate;
 extern ConVar dsp_automatic;
 extern ConVar snd_pitchquality;
 
@@ -537,6 +538,7 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 		//  for the "soundsource" but we still need the lipsync to pause if the game is paused.  Therefore
 		//  I changed SND_IsMouth to look for any .wav on any channels which has sentence data
 		bool bIsMouth = SND_IsMouth(ch);
+
 		bool bShouldPause = IsX360() ? !ch->sfx->m_bIsUISound : bIsMouth; 
 
 		// Tracker 14637:  Pausing the game pauses voice sounds, but not other sounds...
@@ -552,6 +554,24 @@ void MIX_MixChannelsToPaintbuffer( CChannelList &list, int endtime, int flags, i
 			{
 				// UNDONE: recode this as a member function of CAudioMixer
 				SND_MoveMouth8(ch, ch->sfx->pSource, sampleCount);
+			}
+		}
+
+		// Reaching here means this channel survived every reason the mixer
+		// has to skip it and its samples are about to go into a paintbuffer.
+		// That is a stronger thing to assert on than a sound having started,
+		// because a started sound can still be dropped from the channel list
+		// before any of it is heard: on POSIX the mixer removes every channel
+		// while the game is in the background.  Reported once per sound so a
+		// scripted run can name which sounds were actually audible.
+		if ( snd_validate.GetBool() )
+		{
+			static CUtlVector< int > s_ReportedMixed;
+			if ( !s_ReportedMixed.HasElement( ch->guid ) )
+			{
+				s_ReportedMixed.AddToTail( ch->guid );
+				Msg( "RUST_SOUND_MIXED name=%s guid=%d\n",
+					ch->sfx ? ch->sfx->getname() : "unknown", ch->guid );
 			}
 		}
 
@@ -4073,6 +4093,19 @@ void SND_MoveMouth8( channel_t *ch, CAudioSource *pSource, int count )
 				float elapsed = ( float )ch->pMixer->GetSamplePosition() / ( float )pSource->SampleRate();
 
 				vd->SetElapsedTime( elapsed );
+
+				// This position is what picks the current phoneme, so a
+				// position that does not advance holds a speaking face on
+				// one shape.  That is not visible on screen, because a
+				// scene's own flex tracks pose the face beside the
+				// phonemes, so it is reported here rather than left to be
+				// inferred from the mouth.
+				if ( snd_validate.GetBool() )
+				{
+					Msg( "RUST_VOICE_MIXER name=%s position=%d rate=%d elapsed=%.4f\n",
+						ch->sfx ? ch->sfx->getname() : "unknown",
+						ch->pMixer->GetSamplePosition(), pSource->SampleRate(), elapsed );
+				}
 			}
 		}
 	}

@@ -1,0 +1,17 @@
+// Ten-minute frame-synchronized endurance scenario.
+Test_Wait 5
+echo RUST_TEN_MINUTE_STARTED
+Test_StartLoop rust_endurance
++left
++forward
+Test_Wait 1
+-left
+-forward
++right
++back
+Test_Wait 1
+-right
+-back
+Test_LoopForNumSeconds rust_endurance 600
+echo RUST_TEN_MINUTE_COMPLETED
+quit

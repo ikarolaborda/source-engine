@@ -1,0 +1,58 @@
+#! /usr/bin/env python
+# encoding: utf-8
+
+import os
+from waflib import Utils
+
+top = '.'
+
+def options(opt):
+	return
+
+def configure(conf):
+	return
+
+def build(bld):
+	target_dir = bld.bldnode.make_node('cargo-target')
+	profile_dir = target_dir.make_node('release')
+
+	if bld.env.DEST_OS == 'darwin':
+		dynamic_name = 'libsource_abi.dylib'
+	elif bld.env.DEST_OS == 'win32':
+		dynamic_name = 'source_abi.dll'
+	else:
+		dynamic_name = 'libsource_abi.so'
+
+	outputs = [profile_dir.make_node(dynamic_name)]
+	if bld.env.DEST_OS != 'win32':
+		outputs.append(profile_dir.make_node('libsource_abi.a'))
+	if bld.env.DEST_OS == 'darwin':
+		outputs.append(profile_dir.make_node('source-launcher'))
+
+	sources = bld.path.ant_glob('**/*.rs **/Cargo.toml')
+	sources.append(bld.srcnode.find_node('Cargo.toml'))
+	lock = bld.srcnode.find_node('Cargo.lock')
+	if lock:
+		sources.append(lock)
+
+	def run_cargo(task):
+		cargo = task.env.CARGO[0]
+		return task.exec_command([
+			cargo,
+			'build',
+			'--workspace',
+			'--release',
+			'--target-dir', target_dir.abspath(),
+		], cwd=bld.srcnode.abspath())
+
+	bld(
+		name = 'rust_engine_workspace',
+		rule = run_cargo,
+		source = sources,
+		target = outputs,
+		always = False,
+	)
+	bld.install_files(bld.env.LIBDIR, outputs[0])
+	if bld.env.DEST_OS == 'darwin':
+		bld.install_as(os.path.join(bld.env.BINDIR, 'hl2_launcher'),
+			outputs[-1], chmod=Utils.O755)

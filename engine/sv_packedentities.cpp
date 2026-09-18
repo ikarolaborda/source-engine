@@ -33,6 +33,9 @@
 #include "tier0/vcrmode.h"
 #include "vstdlib/jobthread.h"
 #include "enginethreads.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 #ifdef SWDS
 IClientEntityList *entitylist = NULL;
@@ -636,7 +639,41 @@ void CGameServer::AssignClassIds()
 		("CGameServer::AssignClassIds: too many server classes (%i, MAX = %i).\n", nClasses, MAX_SERVER_CLASSES );
 	);
 
+#if defined( SOURCE_RUST_ENGINE )
+	bool bUseRustClassIds = false;
+	uint32_t rustClassIds[MAX_SERVER_CLASSES];
+	SourceAbiDataTableSummary rustSummary;
+	if ( source_rust_bridge_data_table_summary( &rustSummary ) == SOURCE_ABI_OK &&
+		rustSummary.class_count == static_cast<uint32_t>( nClasses ) )
+	{
+		bUseRustClassIds = true;
+		int expectedClassId = 0;
+		for ( ServerClass *pClass = pClasses; pClass; pClass = pClass->m_pNext )
+		{
+			uint32_t classId = UINT32_MAX;
+			if ( source_rust_bridge_server_class_find( pClass->GetName(),
+				Q_strlen( pClass->GetName() ), &classId ) != SOURCE_ABI_OK ||
+				classId != static_cast<uint32_t>( expectedClassId ) )
+			{
+				bUseRustClassIds = false;
+				break;
+			}
+			rustClassIds[expectedClassId++] = classId;
+		}
+	}
+	if ( bUseRustClassIds )
+	{
+		static bool s_bRustClassIdMarkerPrinted = false;
+		if ( !s_bRustClassIdMarkerPrinted )
+		{
+			ConMsg( "Rust server class IDs active: %u classes\n", rustSummary.class_count );
+			s_bRustClassIdMarkerPrinted = true;
+		}
+	}
+	serverclasses = bUseRustClassIds ? static_cast<int>( rustSummary.class_count ) : nClasses;
+#else
 	serverclasses = nClasses;
+#endif
 	serverclassbits = Q_log2( serverclasses ) + 1;
 
 	bool bSpew = CommandLine()->FindParm( "-netspike" ) != 0;
@@ -644,7 +681,12 @@ void CGameServer::AssignClassIds()
 	int curID = 0;
 	for ( ServerClass *pClass=pClasses; pClass; pClass=pClass->m_pNext )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		pClass->m_ClassID = bUseRustClassIds ? static_cast<int>( rustClassIds[curID] ) : curID;
+		++curID;
+#else
 		pClass->m_ClassID = curID++;
+#endif
 
 		if ( bSpew )
 		{
@@ -688,6 +730,5 @@ const char* GetObjectClassName( int objectID )
 		return "[unknown]";
 	}
 }
-
 
 

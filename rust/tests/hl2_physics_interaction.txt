@@ -1,0 +1,48 @@
+// Direct physics-interaction scenario used by run_rust_hl2_smoke.sh.
+//
+// The acceptance scenario only observes physics objects that the map itself
+// activates. This one proves a player action causes a physics change: it
+// spawns a named crate under the crosshair, lets the solver put it to sleep,
+// then punts it with the gravity gun and requires the same object to report an
+// awake state with a nonzero velocity. The crate carries an explicit
+// targetname because spawning condenses every physics prop onto the shared
+// `prop_physics` classname.
+//
+// The wait has to outlast map load, because the script starts running before
+// the player entity exists and every command below needs one.
+Test_Wait 25
+sv_cheats 1
+echo RUST_PHYSICS_INTERACTION_STARTED
+// d1_trainstation_01 opens with a scripted train ride that holds the player
+// in a pod, so nothing here could push a prop. Move to the first map where
+// the player actually has control.
+changelevel d1_trainstation_02
+Test_Wait 25
+echo RUST_PHYSICS_WALK_BEFORE
+getpos 2
++forward
+Test_Wait 2
+-forward
+echo RUST_PHYSICS_WALK_AFTER
+getpos 2
+give weapon_physcannon
+use weapon_physcannon
+Test_Wait 2
+// Pitch down 45 degrees and drop the crate exactly under the crosshair, then
+// leave the view alone so the punt cannot miss. Walking into the crate was
+// tried first and turned out to depend on where it came to rest.
+setang 45 0 0
+prop_physics_create props_junk/wood_crate001a.mdl rust_physics_probe
+Test_Wait 10
+echo RUST_PHYSICS_SETTLED
+physics_debug_entity rust_physics_probe
+echo RUST_PHYSICS_PUSHED
++attack
+Test_Wait 1
+-attack
+echo RUST_PHYSICS_AFTER
+physics_debug_entity rust_physics_probe
+physics_report_active
+Test_Wait 3
+echo RUST_PHYSICS_INTERACTION_COMPLETED
+quit

@@ -745,7 +745,10 @@ CON_COMMAND( hammer_update_entity, "Updates the entity's position/angles when in
 
 	if ( args.ArgC() < 2 )
 	{
-		CBasePlayer *pPlayer = UTIL_GetCommandClient();
+		CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
+		if ( !pPlayer )
+			return;
+
 		trace_t tr;
 		Vector forward;
 		pPlayer->EyeVectors( &forward );

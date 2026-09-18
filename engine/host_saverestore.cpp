@@ -61,6 +61,13 @@
 #include "enginebugreporter.h"
 #include "tier1/memstack.h"
 #include "vstdlib/jobthread.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+// Rust composes the containers it also reads back; these drop to the native
+// writer only if the two disagree about a container.
+static bool s_bRustMapStateEncodeAvailable = true;
+static bool s_bRustSaveHeaderEncodeAvailable = true;
+#endif
 
 #if !defined( _X360 )
 #include "xbox/xboxstubs.h"
@@ -810,22 +817,54 @@ int CSaveRestore::SaveGameSlot( const char *pSaveName, const char *pSaveComment,
 
 	CUtlBuffer saveHeader( pMem, iHeaderBufferSize );
 
-	// Write the header -- THIS SHOULD NEVER CHANGE STRUCTURE, USE SAVE_HEADER FOR NEW HEADER INFORMATION
-	// THIS IS ONLY HERE TO IDENTIFY THE FILE AND GET IT'S SIZE.
-	tag = MAKEID('J','S','A','V');
-	saveHeader.Put( &tag, sizeof(int) );
-	tag = SAVEGAME_VERSION;
-	saveHeader.Put( &tag, sizeof(int) );
-	tag = pSaveData->GetCurPos();
-	saveHeader.Put( &tag, sizeof(int) ); // Does not include token table
+	bool bHeaderComposed = false;
 
-	// Write out the tokens first so we can load them before we load the entities
-	tag = pSaveData->SizeSymbolTable();
-	saveHeader.Put( &tag, sizeof(int) );
-	saveHeader.Put( &tokenSize, sizeof(int) );
-	saveHeader.Put( pTokenData, tokenSize );
+#if defined( SOURCE_RUST_ENGINE )
+	// The same code that reads these containers back composes the leading
+	// sections; the embedded map states are copied in afterwards.
+	if ( s_bRustSaveHeaderEncodeAvailable )
+	{
+		uint64_t nRustBytes = 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_save_container_header_encode(
+			pTokenData, static_cast<uint64_t>( tokenSize ),
+			static_cast<uint64_t>( pSaveData->SizeSymbolTable() ),
+			pSaveData->GetBuffer(), static_cast<uint64_t>( pSaveData->GetCurPos() ),
+			saveHeader.Base(), static_cast<uint64_t>( iHeaderBufferSize ),
+			&nRustBytes );
+		if ( rustStatus == SOURCE_ABI_OK )
+		{
+			saveHeader.SeekPut( CUtlBuffer::SEEK_HEAD, static_cast<int>( nRustBytes ) );
+			SaveMsg( "Rust save container encoded: %llu bytes, %d tokens\n",
+				(unsigned long long)nRustBytes, pSaveData->SizeSymbolTable() );
+			bHeaderComposed = true;
+		}
+		else
+		{
+			s_bRustSaveHeaderEncodeAvailable = false;
+			Warning( "Rust save container encoding disabled: status %d\n", rustStatus );
+		}
+	}
+#endif
 
-	saveHeader.Put( pSaveData->GetBuffer(), pSaveData->GetCurPos() );
+	if ( !bHeaderComposed )
+	{
+		// Write the header -- THIS SHOULD NEVER CHANGE STRUCTURE, USE SAVE_HEADER FOR NEW HEADER INFORMATION
+		// THIS IS ONLY HERE TO IDENTIFY THE FILE AND GET IT'S SIZE.
+		tag = MAKEID('J','S','A','V');
+		saveHeader.Put( &tag, sizeof(int) );
+		tag = SAVEGAME_VERSION;
+		saveHeader.Put( &tag, sizeof(int) );
+		tag = pSaveData->GetCurPos();
+		saveHeader.Put( &tag, sizeof(int) ); // Does not include token table
+
+		// Write out the tokens first so we can load them before we load the entities
+		tag = pSaveData->SizeSymbolTable();
+		saveHeader.Put( &tag, sizeof(int) );
+		saveHeader.Put( &tokenSize, sizeof(int) );
+		saveHeader.Put( pTokenData, tokenSize );
+
+		saveHeader.Put( pSaveData->GetBuffer(), pSaveData->GetCurPos() );
+	}
 	
 	// Create the save game container before the directory copy 
 	g_AsyncSaveCallQueue.QueueCall( g_pSaveRestoreFileSystem, &ISaveRestoreFileSystem::AsyncWrite, CUtlEnvelope<const char *>(name), saveHeader.Base(), saveHeader.TellPut(), true, false, (FSAsyncControl_t *) NULL );
@@ -1462,18 +1501,54 @@ bool CSaveRestore::SaveGameState( bool bTransition, CSaveRestoreData **ppReturnS
 		sectionsInfo.nBytesData;
 
 	void *pBuffer = new byte[nBytesStateFile];
-	CUtlBuffer buffer( pBuffer, nBytesStateFile );
 
-	// Write the header -- THIS SHOULD NEVER CHANGE STRUCTURE, USE SAVE_HEADER FOR NEW HEADER INFORMATION
-	// THIS IS ONLY HERE TO IDENTIFY THE FILE AND GET IT'S SIZE.
+	bool bComposed = false;
 
-	buffer.Put( &CURRENT_SAVEFILE_HEADER_TAG, sizeof(CURRENT_SAVEFILE_HEADER_TAG) );
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust reads these containers back, so it composes them too and refuses
+	// anything its own reader would reject. A refusal means the sections
+	// themselves are inconsistent, so it falls back rather than losing a
+	// transition save, and says so.
+	if ( s_bRustMapStateEncodeAvailable )
+	{
+		uint64_t nRustBytes = 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_save_map_state_encode(
+			sections.pSymbols, static_cast<uint64_t>( sectionsInfo.nBytesSymbols ),
+			static_cast<uint64_t>( sectionsInfo.nSymbols ),
+			sections.pDataHeaders, static_cast<uint64_t>( sectionsInfo.nBytesDataHeaders ),
+			sections.pData, static_cast<uint64_t>( sectionsInfo.nBytesData ),
+			pBuffer, static_cast<uint64_t>( nBytesStateFile ), &nRustBytes );
+		if ( rustStatus == SOURCE_ABI_OK &&
+			nRustBytes == static_cast<uint64_t>( nBytesStateFile ) )
+		{
+			SaveMsg( "Rust map state encoded: %llu bytes, %d tokens\n",
+				(unsigned long long)nRustBytes, sectionsInfo.nSymbols );
+			bComposed = true;
+		}
+		else
+		{
+			s_bRustMapStateEncodeAvailable = false;
+			Warning( "Rust map state encoding disabled: status %d, %llu of %d bytes\n",
+				rustStatus, (unsigned long long)nRustBytes, nBytesStateFile );
+		}
+	}
+#endif
 
-	// Write out the tokens and table FIRST so they are loaded in the right order, then write out the rest of the data in the file.
-	buffer.Put( &sectionsInfo, sizeof(sectionsInfo) );
-	buffer.Put( sections.pSymbols, sectionsInfo.nBytesSymbols );
-	buffer.Put( sections.pDataHeaders, sectionsInfo.nBytesDataHeaders );
-	buffer.Put( sections.pData, sectionsInfo.nBytesData );
+	if ( !bComposed )
+	{
+		CUtlBuffer buffer( pBuffer, nBytesStateFile );
+
+		// Write the header -- THIS SHOULD NEVER CHANGE STRUCTURE, USE SAVE_HEADER FOR NEW HEADER INFORMATION
+		// THIS IS ONLY HERE TO IDENTIFY THE FILE AND GET IT'S SIZE.
+
+		buffer.Put( &CURRENT_SAVEFILE_HEADER_TAG, sizeof(CURRENT_SAVEFILE_HEADER_TAG) );
+
+		// Write out the tokens and table FIRST so they are loaded in the right order, then write out the rest of the data in the file.
+		buffer.Put( &sectionsInfo, sizeof(sectionsInfo) );
+		buffer.Put( sections.pSymbols, sectionsInfo.nBytesSymbols );
+		buffer.Put( sections.pDataHeaders, sectionsInfo.nBytesDataHeaders );
+		buffer.Put( sections.pData, sectionsInfo.nBytesData );
+	}
 
 	if ( !IsXSave() )
 	{
@@ -3177,6 +3252,31 @@ static void LoadSaveGame( const char *savename )
 		return;
 	}
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !saverestore->IsXSave() )
+	{
+		char rustSaveName[MAX_PATH];
+		Q_snprintf( rustSaveName, sizeof( rustSaveName ), "%s%s",
+			saverestore->GetSaveDir(), savename );
+		Q_DefaultExtension( rustSaveName, ".sav", sizeof( rustSaveName ) );
+		Q_FixSlashes( rustSaveName );
+		SourceAbiSaveInfo info = {};
+		const SourceAbiStatus status = source_rust_bridge_save_validate(
+			rustSaveName, Q_strlen( rustSaveName ), &info );
+		if ( status != SOURCE_ABI_OK )
+		{
+			Warning( "Can't load '%s': Rust save validation failed (status %d).\n",
+				savename, status );
+			return;
+		}
+		Msg( "Rust save validated: %s, %llu embedded files, %llu map states, %llu tokens\n",
+			rustSaveName,
+			static_cast<unsigned long long>( info.embedded_file_count ),
+			static_cast<unsigned long long>( info.embedded_map_state_count ),
+			static_cast<unsigned long long>( info.token_count ) );
+	}
+#endif
+
 	GetTestScriptMgr()->SetWaitCheckPoint( "load_game" );
 
 	// if we're not currently in a game, show progress
@@ -3371,4 +3471,3 @@ bool CSaveRestore::IsSaveInProgress()
 {
 	return g_bSaveInProgress;
 }
-

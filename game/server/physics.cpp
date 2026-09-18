@@ -1299,7 +1299,9 @@ CON_COMMAND_F(surfaceprop, "Reports the surface properties at the cursor", FCVAR
 	if ( !UTIL_IsCommandIssuedByServerAdmin() )
 		return;
 
-	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
+	if ( !pPlayer )
+		return;
 
 	trace_t tr;
 	Vector forward;
@@ -1515,7 +1517,9 @@ void PhysicsCommand( const CCommand &args, void (*func)( CBaseEntity *pEntity ) 
 {
 	if ( args.ArgC() < 2 )
 	{
-		CBasePlayer *pPlayer = UTIL_GetCommandClient();
+		CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
+		if ( !pPlayer )
+			return;
 
 		trace_t tr;
 		Vector forward;

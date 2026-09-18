@@ -5664,6 +5664,28 @@ int S_StartStaticSound( StartSoundParams_t& params )
 static ConVar snd_filter( "snd_filter", "", FCVAR_CHEAT );
 #endif // STAGING_ONLY
 
+// Not static: the mixer reports the voice channel's position under the same
+// switch, so that a scripted run turns on one thing and gets both halves.
+ConVar snd_validate( "snd_validate", "0", FCVAR_CHEAT,
+	"Report every sound the mixer actually starts, so scripted runs can assert live audio output rather than only successful decoding." );
+
+// Passes the guid through so the call sites stay single expressions. A
+// non-positive guid means the mixer refused the sound, which is reported
+// separately so a silent scenario is distinguishable from one whose sounds were
+// all rejected.
+static int S_ReportStartedSound( const StartSoundParams_t &params, int guid )
+{
+	if ( snd_validate.GetBool() && params.pSfx )
+	{
+		Msg( "%s name=%s guid=%d channel=%d volume=%.2f pitch=%d static=%d\n",
+			guid > 0 ? "RUST_SOUND_STARTED" : "RUST_SOUND_REJECTED",
+			params.pSfx->getname(), guid, params.entchannel, params.fvol,
+			params.pitch, params.staticsound ? 1 : 0 );
+	}
+
+	return guid;
+}
+
 int S_StartSound( StartSoundParams_t& params )
 {
 
@@ -5690,12 +5712,12 @@ int S_StartSound( StartSoundParams_t& params )
 	if ( params.staticsound )
 	{
 		VPROF_( "StartStaticSound", 0, VPROF_BUDGETGROUP_OTHER_SOUND, false, BUDGETFLAG_OTHER );	
-		return S_StartStaticSound( params );
+		return S_ReportStartedSound( params, S_StartStaticSound( params ) );
 	}
 	else
 	{
 		VPROF_( "StartDynamicSound", 0, VPROF_BUDGETGROUP_OTHER_SOUND, false, BUDGETFLAG_OTHER );
-		return S_StartDynamicSound( params );
+		return S_ReportStartedSound( params, S_StartDynamicSound( params ) );
 	}
 }
 
@@ -6527,6 +6549,7 @@ void S_Update_Guts( float mixAheadTime )
 
 	int samples = endtime - g_paintedtime;
 	samples = samples < 0 ? 0 : samples;
+
 	if ( samples )
 	{
 		THREAD_LOCK_SOUND();

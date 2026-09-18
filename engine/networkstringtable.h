@@ -88,6 +88,9 @@ public:
 	void			CopyStringTable(CNetworkStringTable * table);
 	// buffer IO
 	void			WriteStringTable( bf_write& buf );
+	// Split out because the client-side entries are not table state, so they
+	// stay with the native writer even when Rust encodes the entries above.
+	void			WriteClientSideStringTable( bf_write& buf );
 	bool			ReadStringTable( bf_read& buf );
 
 	bool			WriteBaselines( SVC_CreateStringTable &msg, char *msg_buffer, int msg_buffer_size );
@@ -119,6 +122,10 @@ protected:
 	int						m_nEntryBits;
 	int						m_nTickCount;
 	int						m_nLastChangedTick;
+
+#if defined( SOURCE_RUST_ENGINE )
+	uint64					m_RustTableId;
+#endif
 
 	bool					m_bChangeHistoryEnabled : 1;
 	bool					m_bLocked : 1;

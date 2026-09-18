@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+exclude = ["rust/fuzz"]
+members = [
+    "rust/crates/source-abi",
+    "rust/crates/source-audio",
+    "rust/crates/source-binary",
+    "rust/crates/source-bsp",
+    "rust/crates/source-compress",
+    "rust/crates/source-console",
+    "rust/crates/source-demo",
+    "rust/crates/source-dmx",
+    "rust/crates/source-filesystem",
+    "rust/crates/source-host",
+    "rust/crates/source-input",
+    "rust/crates/source-keyvalues",
+    "rust/crates/source-material",
+    "rust/crates/source-materialsystem",
+    "rust/crates/source-net",
+    "rust/crates/source-pak",
+    "rust/crates/source-render",
+    "rust/crates/source-scene",
+    "rust/crates/source-save",
+    "rust/crates/source-studio",
+    "rust/crates/source-vpk",
+    "rust/crates/source-vtf",
+    "rust/bin/source-launcher",
+    "rust/tools/source-bsp",
+    "rust/tools/source-content-audit",
+    "rust/tools/source-vpk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+panic = "unwind"
+lto = "thin"

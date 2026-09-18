@@ -1237,7 +1237,9 @@ inline uint64 Plat_Rdtsc()
 {
 #if (defined( __arm__ ) || defined( __aarch64__ )) && defined (POSIX)
 	struct timespec t;
-	clock_gettime( CLOCK_REALTIME, &t);
+	// This is a synthetic 1 GHz cycle counter. A monotonic source is required:
+	// wall-clock adjustments must never make profiling durations run backwards.
+	clock_gettime( CLOCK_MONOTONIC, &t);
 	return t.tv_sec * 1000000000ULL + t.tv_nsec;
 #elif defined( _X360 )
 	return ( uint64 )__mftb32();

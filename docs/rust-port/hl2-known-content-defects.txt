@@ -1,0 +1,25 @@
+# Exact shipped failures accepted by source-content-audit for Steam App 220,
+# steam_legacy build 12694556. Format: archive:logical-path<TAB>reason.
+# The audit fails if one of these stops reproducing or if any new defect appears.
+hl2/maps/d2_coast_02.bsp	zero-byte placeholder has no BSP header
+episodic/maps/ep1_citadel_00_demo.bsp	ambient-lighting lump 55 extends beyond the file
+ep2_pak_dir.vpk:materials/models/gibs/combine_helicopter_gibs/combine_helicopter02.vmt	stray trailing 's' after the root object
+ep1_pak_dir.vpk:materials/models/stalker/stalker_teeth.vmt	unterminated block comment
+hl2_misc_dir.vpk:materials/models/props_lab/tank_glass001_dx60.vmt	missing closing braces
+hl2_misc_dir.vpk:models/props_combine/combine_barricade_med03a.dx7_2bone.vtx	obsolete VTX version 6 rejected by the version 7 engine loader
+hl2_misc_dir.vpk:models/props_combine/combine_barricade_med04a.dx7_2bone.vtx	obsolete VTX version 6 rejected by the version 7 engine loader
+hl2_misc_dir.vpk:models/props_combine/combine_barricade_med04b.dx7_2bone.vtx	obsolete VTX version 6 rejected by the version 7 engine loader
+hl2_misc_dir.vpk:models/props_junk/wood_crate001a_damaged.phy	malformed property text contains 'break break {'
+ep1_pak_dir.vpk:models/advisorpod.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/editor/cone_helper.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/gunship.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/props_buildings/row_res_2_ascend_fullscale.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/props_combine/combine_citadel001.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/props_combine/pod_extractor.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/props_wasteland/bridge_railing.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/props_wasteland/depot.phy	PHY checksum does not match the paired MDL
+hl2_misc_dir.vpk:models/shield_scanner.phy	PHY checksum does not match the paired MDL
+hl2_sound_vo_english_dir.vpk:sound/vo/novaprospekt/al_pickherup.wav	stored payload has a bad CRC; its absent final RIFF pad byte is otherwise accepted as a Source compatibility quirk
+# Historical GoldSrc/very-early Source developer demos use the legacy HLDEMO protocol 2
+hl2_pak_dir.vpk:bump3.dem	legacy HLDEMO/protocol 2 recording is outside the preserved HL2DEMO protocol 3 format
+hl2_pak_dir.vpk:devtest.dem	legacy HLDEMO/protocol 2 recording is outside the preserved HL2DEMO protocol 3 format

@@ -5795,7 +5795,10 @@ void CC_Prop_Dynamic_Create( const CCommand &args )
 		return;
 
 	// Figure out where to place it
-	CBasePlayer* pPlayer = UTIL_GetCommandClient();
+	CBasePlayer* pPlayer = UTIL_GetCommandClientOrHost();
+	if ( !pPlayer )
+		return;
+
 	Vector forward;
 	pPlayer->EyeVectors( &forward );
 
@@ -5873,7 +5876,7 @@ static ConCommand prop_dynamic_create("prop_dynamic_create", CC_Prop_Dynamic_Cre
 //------------------------------------------------------------------------------
 void CC_Prop_Physics_Create( const CCommand &args )
 {
-	if ( args.ArgC() != 2 )
+	if ( args.ArgC() < 2 || args.ArgC() > 3 )
 		return;
 
 	char pModelName[512];
@@ -5881,14 +5884,38 @@ void CC_Prop_Physics_Create( const CCommand &args )
 	Q_DefaultExtension( pModelName, ".mdl", sizeof(pModelName) );
 
 	// Figure out where to place it
-	CBasePlayer* pPlayer = UTIL_GetCommandClient();
+	CBasePlayer* pPlayer = UTIL_GetCommandClientOrHost();
+	if ( !pPlayer )
+	{
+		Msg( "prop_physics_create: no player to aim from\n" );
+		return;
+	}
+
 	Vector forward;
 	pPlayer->EyeVectors( &forward );
 
-	CreatePhysicsProp( pModelName, pPlayer->EyePosition(), pPlayer->EyePosition() + forward * MAX_TRACE_LENGTH, pPlayer, true );
+	CPhysicsProp *pProp = CreatePhysicsProp( pModelName, pPlayer->EyePosition(),
+		pPlayer->EyePosition() + forward * MAX_TRACE_LENGTH, pPlayer, true );
+	if ( !pProp )
+	{
+		Msg( "prop_physics_create: could not place %s\n", pModelName );
+		return;
+	}
+
+	// Spawning condenses every physics prop onto the shared prop_physics
+	// classname, so an explicit name is the only way to address one of them
+	// afterwards.
+	if ( args.ArgC() == 3 )
+	{
+		pProp->SetName( AllocPooledString( args[2] ) );
+		Msg( "prop_physics_create: placed %s as %s\n", pModelName, args[2] );
+		return;
+	}
+
+	Msg( "prop_physics_create: placed %s\n", pModelName );
 }
 
-static ConCommand prop_physics_create("prop_physics_create", CC_Prop_Physics_Create, "Creates a physics prop with a specific .mdl aimed away from where the player is looking.\n\tArguments: {.mdl name}", FCVAR_CHEAT);
+static ConCommand prop_physics_create("prop_physics_create", CC_Prop_Physics_Create, "Creates a physics prop with a specific .mdl aimed away from where the player is looking.\n\tArguments: {.mdl name} {targetname:optional}", FCVAR_CHEAT);
 
 
 CPhysicsProp* CreatePhysicsProp( const char *pModelName, const Vector &vTraceStart, const Vector &vTraceEnd, const IHandleEntity *pTraceIgnore, bool bRequireVCollide, const char *pClassName )
@@ -6111,7 +6138,7 @@ bool UTIL_CreateScaledPhysObject( CBaseAnimating *pInstance, float flScale )
 //------------------------------------------------------------------------------
 void CC_Ent_Rotate( const CCommand &args )
 {
-	CBasePlayer* pPlayer = UTIL_GetCommandClient();
+	CBasePlayer* pPlayer = UTIL_GetCommandClientOrHost();
 	CBaseEntity* pEntity = FindPickerEntity( pPlayer );
 	if ( !pEntity )
 		return;

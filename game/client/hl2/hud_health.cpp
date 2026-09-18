@@ -120,6 +120,11 @@ void CHudHealth::OnThink()
 		newHealth = MAX( local->GetHealth(), 0 );
 	}
 
+	// Reported every think rather than only on a change, so a scripted run can
+	// distinguish an element that is tracking the player from one that stopped
+	// updating at its initial value.
+	HudValidateReport( "RUST_HUD_HEALTH value=%d", newHealth );
+
 	// Only update the fade if we've changed health
 	if ( newHealth == m_iHealth )
 	{

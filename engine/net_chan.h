@@ -244,6 +244,11 @@ private:
 
 	INetMessage *FindMessage(int type);
 
+#if defined( SOURCE_RUST_ENGINE )
+	bool	RustAdvanceOutgoingSequence( int *previousSequence );
+	void	RustRemoveChannel();
+#endif
+
 	static bool HandleUpload( dataFragments_t *data, INetChannelHandler *MessageHandler );
 
 #ifdef STAGING_ONLY
@@ -263,6 +268,15 @@ public:
 	int			m_nInSequenceNr;
 	// last received acknowledge outgoing sequnce number
 	int			m_nOutSequenceNrAck;
+
+#if defined( SOURCE_RUST_ENGINE )
+	uint64		m_RustChannelId;
+	bool		m_bRustOutgoingSequenceObserved;
+	bool		m_bRustIncomingDecisionObserved;
+	bool		m_bRustPacketChecksumObserved;
+	bool		m_bRustOutgoingHeaderObserved;
+	bool		m_bRustPacketHeaderObserved;
+#endif
 	
 	// state of outgoing reliable data (0/1) flip flop used for loss detection
 	int			m_nOutReliableState;

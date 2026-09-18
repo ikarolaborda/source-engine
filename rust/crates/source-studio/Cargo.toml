@@ -1,0 +1,17 @@
+[package]
+name = "source-studio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+source-binary = { path = "../source-binary" }
+source-keyvalues = { path = "../source-keyvalues" }
+
+[dev-dependencies]
+source-filesystem = { path = "../source-filesystem" }
+source-vpk = { path = "../source-vpk" }
+
+[lints]
+workspace = true

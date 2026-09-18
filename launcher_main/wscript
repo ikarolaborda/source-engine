@@ -17,6 +17,10 @@ def configure(conf):
 def build(bld):
 	if bld.env.DEST_OS == 'android':
 		return
+	if bld.env.RUST_ENGINE and bld.env.DEST_OS == 'darwin':
+		# The Cargo workspace installs the Rust-owned process entry as hl2_launcher.
+		# liblauncher remains the single transitional callback it loads.
+		return
 
 	source = ['main.cpp']
 	includes = ['../public']
@@ -42,4 +46,3 @@ def build(bld):
 		subsystem = bld.env.MSVC_SUBSYSTEM,
 		idx      = bld.get_taskgen_count()
 	)
-

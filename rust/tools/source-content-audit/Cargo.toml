@@ -1,0 +1,22 @@
+[package]
+name = "source-content-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+source-audio = { path = "../../crates/source-audio" }
+source-bsp = { path = "../../crates/source-bsp" }
+source-demo = { path = "../../crates/source-demo" }
+source-dmx = { path = "../../crates/source-dmx" }
+source-keyvalues = { path = "../../crates/source-keyvalues" }
+source-net = { path = "../../crates/source-net" }
+source-save = { path = "../../crates/source-save" }
+source-scene = { path = "../../crates/source-scene" }
+source-studio = { path = "../../crates/source-studio" }
+source-vpk = { path = "../../crates/source-vpk" }
+source-vtf = { path = "../../crates/source-vtf" }
+
+[lints]
+workspace = true

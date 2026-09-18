@@ -1,0 +1,14 @@
+[package]
+name = "source-pak"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# For the CRC the ZIP format checks entries with, which is the same
+# polynomial the VPK directory uses.
+source-vpk = { path = "../source-vpk" }
+
+[lints]
+workspace = true

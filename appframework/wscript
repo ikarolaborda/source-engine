@@ -2,10 +2,24 @@
 # encoding: utf-8
 
 from waflib import Utils
+from waflib.TaskGen import feature, after_method
 import os
 
 top = '.'
 PROJECT_NAME = 'appframework'
+
+@feature('rust_static_link')
+@after_method('apply_link')
+def add_rust_static_library(self):
+	# Treat Cargo's static library as a first-class linker input. Sharing the
+	# exact output node with the Cargo task gives Waf its content dependency.
+	# Explicitly post and order the producer as well so a targeted launcher build
+	# works from a clean tree rather than only as part of the default build.
+	cargo = self.bld.get_tgen_by_name('rust_engine_workspace')
+	cargo.post()
+	for task in cargo.tasks:
+		self.link_task.run_after.add(task)
+	self.link_task.inputs.append(self.rust_static_library)
 
 def options(opt):
 	# stub
@@ -49,6 +63,8 @@ def build(bld):
 	defines = []
 
 	libs = []
+	if bld.env.RUST_ENGINE:
+		defines += ['SOURCE_RUST_ENGINE=1']
 
 	if bld.env.DEST_OS == 'darwin':
 		libs += ['FOUNDATION', 'APPKIT', 'IOKIT']
@@ -65,3 +81,22 @@ def build(bld):
 		idx      = bld.get_taskgen_count()
 	)
 
+	if bld.env.RUST_ENGINE:
+		static_name = 'source_abi.lib' if bld.env.DEST_OS == 'win32' else 'libsource_abi.a'
+		rust_static = bld.bldnode.make_node('cargo-target/release/' + static_name)
+		rust_linkflags = []
+		if bld.env.DEST_OS == 'darwin':
+			rust_linkflags += ['-Wl,-install_name,@loader_path/librust_engine_bridge.dylib']
+		bld.shlib(
+			source   = ['rust_engine_bridge.cpp'],
+			target   = 'rust_engine_bridge',
+			name     = 'rust_engine_bridge',
+			features = 'c cxx rust_static_link',
+			includes = includes,
+			defines  = ['SOURCE_RUST_BRIDGE_BUILD=1'],
+			linkflags = rust_linkflags,
+			install_path = bld.env.LIBDIR,
+			rust_static_library = rust_static,
+			subsystem = bld.env.MSVC_SUBSYSTEM,
+			idx      = bld.get_taskgen_count()
+		)

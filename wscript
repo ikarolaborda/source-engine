@@ -6,6 +6,7 @@ from __future__ import print_function
 from waflib import Logs, Context, Configure
 import sys
 import os
+import re
 
 VERSION = '1.0'
 APPNAME = 'source-engine'
@@ -322,6 +323,9 @@ def options(opt):
 	grp.add_option('--sanitize', action = 'store', dest = 'SANITIZE', default = '',
 		help = 'build with sanitizers [default: %default]')
 
+	grp.add_option('--rust-engine', action = 'store_true', dest = 'RUST_ENGINE', default = False,
+		help = 'build the transitional Rust ABI and C++ lifecycle adapter [default: %default]')
+
 	opt.load('compiler_optimizations subproject')
 
 	opt.load('xcompile compiler_cxx compiler_c sdl2 clang_compilation_database strip_on_install_v2 waf_unit_test subproject')
@@ -433,6 +437,49 @@ def check_deps(conf):
 
 		# conf.multicheck(*a, run_all_tests = True, mandatory = True)
 
+def pinned_rust_channel(conf):
+	'''Reads the channel out of rust-toolchain.toml.
+
+	Parsed by hand rather than with tomllib, because waf still runs on Pythons
+	that predate it.'''
+	pin = conf.path.find_node('rust-toolchain.toml')
+	if not pin:
+		conf.fatal('rust-toolchain.toml is missing, so there is no toolchain to pin to')
+	match = re.search(r'^\s*channel\s*=\s*"([^"]+)"', pin.read(), re.MULTILINE)
+	if not match:
+		conf.fatal('rust-toolchain.toml declares no channel')
+	return match.group(1)
+
+def check_pinned_rust_toolchain(conf):
+	'''Fails configuration when cargo or rustc is not the pinned toolchain.
+
+	A Rust installed outside rustup, such as Homebrew's, takes precedence on
+	PATH and silently ignores rust-toolchain.toml. The engine would then link
+	against a library built by a different compiler than CI uses, so the
+	mismatch is refused here rather than discovered as a divergence later.'''
+	channel = pinned_rust_channel(conf)
+
+	for var in ('CARGO', 'RUSTC'):
+		tool = conf.env[var][0]
+		conf.start_msg('Checking %s is Rust %s' % (os.path.basename(tool), channel))
+		try:
+			reported = conf.cmd_and_log([tool, '--version']).strip()
+		except Exception as error:
+			conf.end_msg('no', color='RED')
+			conf.fatal('%s would not report a version: %s' % (tool, error))
+
+		# Versions read as "cargo 1.85.1 (hash date)", so the pin has to match
+		# the version field on its own rather than anywhere in the line.
+		version = reported.split()[1] if len(reported.split()) > 1 else ''
+		if version != channel:
+			conf.end_msg(reported, color='RED')
+			conf.fatal(
+				'%s reports %s but rust-toolchain.toml pins %s.\n'
+				'A non-rustup Rust earlier on PATH ignores the pin. Put rustup\'s '
+				'shims first (export PATH="$HOME/.cargo/bin:$PATH") or point '
+				'%s at the pinned toolchain.' % (tool, version or reported, channel, var))
+		conf.end_msg(reported)
+
 def configure(conf):
 	conf.load('fwgslib reconfigure compiler_optimizations')
 
@@ -440,6 +487,11 @@ def configure(conf):
 	# subsystem=bld.env.MSVC_SUBSYSTEM
 	# TODO: wrapper around bld.stlib, bld.shlib and so on?
 	conf.env.MSVC_SUBSYSTEM = 'WINDOWS,5.01'
+	conf.env.RUST_ENGINE = conf.options.RUST_ENGINE
+	if conf.env.RUST_ENGINE:
+		conf.find_program('cargo', var='CARGO', mandatory=True)
+		conf.find_program('rustc', var='RUSTC', mandatory=True)
+		check_pinned_rust_toolchain(conf)
 	conf.env.MSVC_TARGETS = ['x64'] # explicitly request x86 target for MSVC
 	if conf.options.TARGET32:
 		conf.env.MSVC_TARGETS = ['x86']
@@ -617,6 +669,9 @@ def configure(conf):
 		conf.env.CC.insert(0, 'ccache')
 		conf.env.CXX.insert(0, 'ccache')
 
+	if conf.env.RUST_ENGINE:
+		conf.add_subproject(['rust'])
+
 	if conf.options.TESTS:
 		conf.add_subproject(projects['tests'])
 	elif conf.options.DEDICATED:
@@ -638,6 +693,9 @@ def build(bld):
 
 	if bld.env.OPUS or bld.env.DEST_OS == 'android':
 		projects['game'] += ['engine/voice_codecs/opus']
+
+	if bld.env.RUST_ENGINE:
+		bld.add_subproject(['rust'])
 
 	if bld.env.TESTS:
 		bld.add_subproject(projects['tests'])

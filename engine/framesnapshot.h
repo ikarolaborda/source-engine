@@ -87,6 +87,7 @@ public:
 
 	// Associated frame. 
 	int						m_nTickCount; // = sv.tickcount
+	uint64					m_nRustSnapshotId; // Canonical metadata handle; zero for native-only snapshots.
 	
 	// State information
 	CFrameSnapshotEntry		*m_pEntities;	

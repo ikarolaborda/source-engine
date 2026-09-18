@@ -22,6 +22,10 @@
 #include "net_ws_queued_packet_sender.h"
 #include "filesystem_init.h"
 
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -360,7 +364,12 @@ void CNetChan::Shutdown(const char *pReason)
 	// send discconect
 
 	if ( m_Socket < 0 )
+	{
+#if defined( SOURCE_RUST_ENGINE )
+		RustRemoveChannel();
+#endif
 		return;
+	}
 
 	Clear(); // free all buffers (reliable & unreliable)
 
@@ -403,17 +412,31 @@ void CNetChan::Shutdown(const char *pReason)
 
 	if ( m_bProcessingMessages )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		RustRemoveChannel();
+#endif
 		NET_RemoveNetChannel( this, false );	// Delay the deletion or it'll crash in the message-processing loop.
 		m_bShouldDelete = true;
 	}
 	else
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		RustRemoveChannel();
+#endif
 		NET_RemoveNetChannel( this, true );
 	}
 }
 
 CNetChan::CNetChan()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	m_RustChannelId = 0;
+	m_bRustOutgoingSequenceObserved = false;
+	m_bRustIncomingDecisionObserved = false;
+	m_bRustPacketChecksumObserved = false;
+	m_bRustOutgoingHeaderObserved = false;
+	m_bRustPacketHeaderObserved = false;
+#endif
 	m_nSplitPacketSequence = 1;
 	m_nMaxRoutablePayloadSize = MAX_ROUTABLE_PAYLOAD;
 	m_bProcessingMessages = false;
@@ -471,6 +494,41 @@ CNetChan::~CNetChan()
 	Shutdown("NetChannel removed.");
 }
 
+#if defined( SOURCE_RUST_ENGINE )
+bool CNetChan::RustAdvanceOutgoingSequence( int *previousSequence )
+{
+	if ( m_RustChannelId == 0 )
+		return false;
+
+	SourceAbiNetSequenceAdvance advance;
+	if ( source_rust_bridge_net_channel_advance_outgoing( m_RustChannelId,
+		&advance ) != SOURCE_ABI_OK )
+	{
+		m_RustChannelId = 0;
+		return false;
+	}
+
+	if ( previousSequence )
+		*previousSequence = advance.previous;
+	m_nOutSequenceNr = advance.current;
+	if ( !m_bRustOutgoingSequenceObserved )
+	{
+		ConMsg( "Rust net channel outgoing sequence active: %s\n", m_Name );
+		m_bRustOutgoingSequenceObserved = true;
+	}
+	return true;
+}
+
+void CNetChan::RustRemoveChannel()
+{
+	if ( m_RustChannelId == 0 )
+		return;
+
+	source_rust_bridge_net_channel_remove( m_RustChannelId );
+	m_RustChannelId = 0;
+}
+#endif
+
 /*
 ==============
 CNetChan::Setup
@@ -483,6 +541,15 @@ void CNetChan::Setup(int sock, netadr_t *adr, const char * name, INetChannelHand
 {
 	Assert( name ); 
 	Assert ( handler );
+
+#if defined( SOURCE_RUST_ENGINE )
+	RustRemoveChannel();
+	m_bRustOutgoingSequenceObserved = false;
+	m_bRustIncomingDecisionObserved = false;
+	m_bRustPacketChecksumObserved = false;
+	m_bRustOutgoingHeaderObserved = false;
+	m_bRustPacketHeaderObserved = false;
+#endif
 
 	m_Socket = sock;
 
@@ -533,6 +600,18 @@ void CNetChan::Setup(int sock, netadr_t *adr, const char * name, INetChannelHand
 	m_nInReliableState = 0;	// last remote reliable state
 	m_nChokedPackets = 0;
 	m_fClearTime = 0.0;
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( source_rust_bridge_net_channel_create( m_nOutSequenceNr,
+		m_nInSequenceNr, m_nOutSequenceNrAck, &m_RustChannelId ) == SOURCE_ABI_OK )
+	{
+		ConMsg( "Rust net channel sequencing active: %s\n", m_Name );
+	}
+	else
+	{
+		m_RustChannelId = 0;
+	}
+#endif
 	
 	m_ChallengeNr = 0;
 
@@ -625,6 +704,14 @@ void CNetChan::SetSequenceData( int nOutSequenceNr, int nInSequenceNr, int nOutS
 	m_nOutSequenceNr = nOutSequenceNr;
 	m_nInSequenceNr = nInSequenceNr;
 	m_nOutSequenceNrAck = nOutSequenceNrAck;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustChannelId != 0 &&
+		source_rust_bridge_net_channel_reset( m_RustChannelId,
+			m_nOutSequenceNr, m_nInSequenceNr, m_nOutSequenceNrAck ) != SOURCE_ABI_OK )
+	{
+		m_RustChannelId = 0;
+	}
+#endif
 }
 
 void CNetChan::SetDemoRecorder(IDemoRecorder * recorder)
@@ -950,7 +1037,12 @@ void CNetChan::FlowUpdate(int flow, int addbytes)
 
 void CNetChan::SetChoked( void )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !RustAdvanceOutgoingSequence( NULL ) )
+		m_nOutSequenceNr++;
+#else
 	m_nOutSequenceNr++;	// sends to be done since move command use sequence number
+#endif
 	m_nChokedPackets++;
 }
 
@@ -1600,8 +1692,15 @@ int CNetChan::SendDatagram(bf_write *datagram)
 		m_nChokedPackets = 0;	// Reset choke state
 		m_StreamReliable.Reset();		// clear current reliable buffer
 		m_StreamUnreliable.Reset();		// clear current unrelaible buffer
+#if defined( SOURCE_RUST_ENGINE )
+		int sentSequence = m_nOutSequenceNr;
+		if ( !RustAdvanceOutgoingSequence( &sentSequence ) )
+			m_nOutSequenceNr++;
+		return sentSequence;
+#else
 		m_nOutSequenceNr++;
 		return m_nOutSequenceNr-1;
+#endif
 	}
 
 	// process all new and pending reliable data, return true if reliable data should
@@ -1623,37 +1722,63 @@ int CNetChan::SendDatagram(bf_write *datagram)
 	// Prepare the packet header
 	// build packet flags
 	unsigned char flags = 0;
-
-	// start writing packet
-
-	send.WriteLong ( m_nOutSequenceNr );
-	send.WriteLong ( m_nInSequenceNr );
-
 	bf_write flagsPos = send; // remember flags byte position
-
-	send.WriteByte ( 0 ); // write correct flags value later
-	if ( ShouldChecksumPackets() )
+	int nCheckSumStart = 0;
+	bool bRustEncodedHeader = false;
+#if defined( SOURCE_RUST_ENGINE )
+	SourceAbiNetEncodedPacketHeader rustHeader;
+	if ( m_RustChannelId != 0 &&
+		source_rust_bridge_net_packet_encode_header( m_nOutSequenceNr,
+			m_nInSequenceNr, static_cast<uint32_t>( m_nInReliableState ),
+			m_nChokedPackets > 0, static_cast<uint32_t>( m_nChokedPackets & 0xFF ),
+			true, m_ChallengeNr, ShouldChecksumPackets(), &rustHeader ) == SOURCE_ABI_OK &&
+		rustHeader.length <= sizeof( rustHeader.bytes ) &&
+		rustHeader.flags_offset < rustHeader.length &&
+		rustHeader.checksum_start <= rustHeader.length &&
+		rustHeader.base_flags <= 0xFF &&
+		send.WriteBytes( rustHeader.bytes, static_cast<int>( rustHeader.length ) ) )
 	{
-		send.WriteShort( 0 );  // write correct checksum later
-		Assert( !(send.GetNumBitsWritten() % 8 ) );
+		flags = static_cast<unsigned char>( rustHeader.base_flags );
+		flagsPos = send;
+		flagsPos.SeekToBit( static_cast<int>( rustHeader.flags_offset * 8 ) );
+		nCheckSumStart = static_cast<int>( rustHeader.checksum_start );
+		bRustEncodedHeader = true;
+		if ( !m_bRustOutgoingHeaderObserved )
+		{
+			ConMsg( "Rust net packet outgoing header active: %s\n", m_Name );
+			m_bRustOutgoingHeaderObserved = true;
+		}
 	}
+#endif
 
-	// Note, this only matters on the PC
-	int nCheckSumStart = send.GetNumBytesWritten();
-
-	send.WriteByte ( m_nInReliableState );
-
-	if ( m_nChokedPackets > 0 )
+	if ( !bRustEncodedHeader )
 	{
-		flags |= PACKET_FLAG_CHOKED;
-		send.WriteByte ( m_nChokedPackets & 0xFF );	// send number of choked packets
+		// start writing packet
+		send.WriteLong ( m_nOutSequenceNr );
+		send.WriteLong ( m_nInSequenceNr );
+
+		flagsPos = send;
+		send.WriteByte ( 0 ); // write correct flags value later
+		if ( ShouldChecksumPackets() )
+		{
+			send.WriteShort( 0 );  // write correct checksum later
+			Assert( !(send.GetNumBitsWritten() % 8 ) );
+		}
+
+		// Note, this only matters on the PC
+		nCheckSumStart = send.GetNumBytesWritten();
+
+		send.WriteByte ( m_nInReliableState );
+		if ( m_nChokedPackets > 0 )
+		{
+			flags |= PACKET_FLAG_CHOKED;
+			send.WriteByte ( m_nChokedPackets & 0xFF );	// send number of choked packets
+		}
+
+		// always append a challenge number
+		flags |= PACKET_FLAG_CHALLENGE;
+		send.WriteLong( m_ChallengeNr );
 	}
-
-	// always append a challenge number
-	flags |= PACKET_FLAG_CHALLENGE ;
-
-	// append the challenge number itself right on the end
-	send.WriteLong( m_ChallengeNr );
 
 	if ( SendSubChannelData( send ) )
 	{
@@ -1751,17 +1876,34 @@ int CNetChan::SendDatagram(bf_write *datagram)
 		}
 	}
 
-	// write correct flags value and the checksum
-	flagsPos.WriteByte( flags ); 
-
-	// Compute checksum (must be aligned to a byte boundary!!)
-	if ( ShouldChecksumPackets() )
+	// Finalize the flags and optional checksum after the payload is complete.
+	bool bRustFinalizedHeader = false;
+	unsigned short usCheckSum = 0;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( bRustEncodedHeader &&
+		source_rust_bridge_net_packet_finalize_header( send.GetData(),
+			static_cast<uint64_t>( send.GetNumBytesWritten() ), flags,
+			ShouldChecksumPackets(), &usCheckSum ) == SOURCE_ABI_OK )
 	{
-		const void *pvData = send.GetData() + nCheckSumStart;
-		Assert( !(send.GetNumBitsWritten() % 8 ) );
-		int nCheckSumBytes = send.GetNumBytesWritten() - nCheckSumStart;
-		unsigned short usCheckSum = BufferToShortChecksum( pvData, nCheckSumBytes );
-		flagsPos.WriteUBitLong( usCheckSum, 16 );
+		bRustFinalizedHeader = true;
+		if ( ShouldChecksumPackets() && !m_bRustPacketChecksumObserved )
+		{
+			ConMsg( "Rust net packet checksum active: %s\n", m_Name );
+			m_bRustPacketChecksumObserved = true;
+		}
+	}
+#endif
+	if ( !bRustFinalizedHeader )
+	{
+		flagsPos.WriteByte( flags );
+		if ( ShouldChecksumPackets() )
+		{
+			const void *pvData = send.GetData() + nCheckSumStart;
+			Assert( !(send.GetNumBitsWritten() % 8 ) );
+			int nCheckSumBytes = send.GetNumBytesWritten() - nCheckSumStart;
+			usCheckSum = BufferToShortChecksum( pvData, nCheckSumBytes );
+			flagsPos.WriteUBitLong( usCheckSum, 16 );
+		}
 	}
 
 	// Send the datagram
@@ -1824,9 +1966,16 @@ int CNetChan::SendDatagram(bf_write *datagram)
 	}
 	
 	m_nChokedPackets = 0;
+#if defined( SOURCE_RUST_ENGINE )
+	int sentSequence = m_nOutSequenceNr;
+	if ( !RustAdvanceOutgoingSequence( &sentSequence ) )
+		m_nOutSequenceNr++;
+	return sentSequence;
+#else
 	m_nOutSequenceNr++;
 
 	return m_nOutSequenceNr-1; // return send seq nr
+#endif
 }
 
 bool CNetChan::ProcessControlMessage( int cmd, bf_read &buf)
@@ -2231,51 +2380,160 @@ bool CNetChan::CheckReceivingList(int nList)
 
 int CNetChan::ProcessPacketHeader( netpacket_t * packet )
 {
-	// get sequence numbers		
-	int sequence	= packet->message.ReadLong();
-	int sequence_ack= packet->message.ReadLong();
-	int flags		= packet->message.ReadByte();
-
-	if ( ShouldChecksumPackets() )
+	int sequence = 0;
+	int sequence_ack = 0;
+	int flags = 0;
+	int relState = 0;	// reliable state of 8 subchannels
+	int nChoked = 0;	// read later if choked flag is set
+	bool bRustHeader = false;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustChannelId != 0 )
 	{
-		unsigned short usCheckSum = (unsigned short)packet->message.ReadUBitLong( 16 );
-
-		// Checksum applies to rest of packet
-		Assert( !( packet->message.GetNumBitsRead() % 8 ) );
-		int nOffset = packet->message.GetNumBitsRead() >> 3;
-		int nCheckSumBytes = packet->message.TotalBytesAvailable() - nOffset;
-	
-		const void *pvData = packet->message.GetBasePointer() + nOffset;
-		unsigned short usDataCheckSum = BufferToShortChecksum( pvData, nCheckSumBytes );
-	
-		if ( usDataCheckSum != usCheckSum )
+		SourceAbiNetPacketHeader rustHeader;
+		const int nPacketBytes = packet->message.TotalBytesAvailable();
+		const SourceAbiStatus status = source_rust_bridge_net_packet_header(
+			packet->message.GetBasePointer(), static_cast<uint64_t>( nPacketBytes ),
+			ShouldChecksumPackets(), m_bStreamContainsChallenge, m_ChallengeNr,
+			&rustHeader );
+		if ( status == SOURCE_ABI_OK )
 		{
-			ConMsg ("%s:corrupted packet %i at %i\n"
-				, remote_address.ToString ()
-				, sequence
-				, m_nInSequenceNr);
-			return -1;
+			if ( !rustHeader.accepted )
+			{
+				if ( rustHeader.reason == SOURCE_NET_HEADER_CHECKSUM_MISMATCH )
+				{
+					ConMsg ("%s:corrupted packet %i at %i\n"
+						, remote_address.ToString ()
+						, rustHeader.sequence
+						, m_nInSequenceNr);
+				}
+				return -1;
+			}
+			if ( rustHeader.header_bytes > static_cast<uint32_t>( nPacketBytes ) ||
+				rustHeader.header_bytes > static_cast<uint32_t>( INT_MAX / 8 ) ||
+				!packet->message.Seek( static_cast<int>( rustHeader.header_bytes * 8 ) ) )
+			{
+				return -1;
+			}
+			sequence = rustHeader.sequence;
+			sequence_ack = rustHeader.outgoing_ack;
+			flags = static_cast<int>( rustHeader.flags );
+			relState = static_cast<int>( rustHeader.reliable_state );
+			nChoked = static_cast<int>( rustHeader.choked );
+			if ( flags & PACKET_FLAG_CHALLENGE )
+				m_bStreamContainsChallenge = true;
+			if ( !m_bRustPacketHeaderObserved )
+			{
+				ConMsg( "Rust net packet header active: %s\n", m_Name );
+				m_bRustPacketHeaderObserved = true;
+			}
+			bRustHeader = true;
+		}
+	}
+#endif
+
+	if ( !bRustHeader )
+	{
+		// get sequence numbers
+		sequence = packet->message.ReadLong();
+		sequence_ack = packet->message.ReadLong();
+		flags = packet->message.ReadByte();
+
+		if ( ShouldChecksumPackets() )
+		{
+			unsigned short usCheckSum = (unsigned short)packet->message.ReadUBitLong( 16 );
+
+			// Checksum applies to rest of packet
+			Assert( !( packet->message.GetNumBitsRead() % 8 ) );
+			int nOffset = packet->message.GetNumBitsRead() >> 3;
+			int nCheckSumBytes = packet->message.TotalBytesAvailable() - nOffset;
+
+			const void *pvData = packet->message.GetBasePointer() + nOffset;
+			unsigned short usDataCheckSum = BufferToShortChecksum( pvData, nCheckSumBytes );
+
+			if ( usDataCheckSum != usCheckSum )
+			{
+				ConMsg ("%s:corrupted packet %i at %i\n"
+					, remote_address.ToString ()
+					, sequence
+					, m_nInSequenceNr);
+				return -1;
+			}
+		}
+
+		relState = packet->message.ReadByte();
+
+		if ( flags & PACKET_FLAG_CHOKED )
+			nChoked = packet->message.ReadByte();
+
+		if ( flags & PACKET_FLAG_CHALLENGE )
+		{
+			unsigned int nChallenge = packet->message.ReadLong();
+			if ( nChallenge != m_ChallengeNr )
+				return -1;
+			// challenge was good, latch we saw a good one
+			m_bStreamContainsChallenge = true;
+		}
+		else if ( m_bStreamContainsChallenge )
+			return -1; // what, no challenge in this packet but we got them before?
+	}
+
+	int i,j;
+
+#if defined( SOURCE_RUST_ENGINE )
+	bool bRustSequenceDecision = false;
+	SourceAbiNetPacketDecision rustSequenceDecision;
+	if ( m_RustChannelId != 0 )
+	{
+		const SourceAbiStatus status = source_rust_bridge_net_channel_preview_incoming(
+			m_RustChannelId, sequence, sequence_ack, static_cast<uint32_t>( nChoked ),
+			net_maxpacketdrop.GetInt(), &rustSequenceDecision );
+		if ( status == SOURCE_ABI_OK )
+		{
+			if ( !m_bRustIncomingDecisionObserved )
+			{
+				ConMsg( "Rust net channel incoming decisions active: %s\n", m_Name );
+				m_bRustIncomingDecisionObserved = true;
+			}
+			bRustSequenceDecision = true;
+			m_PacketDrop = rustSequenceDecision.dropped;
+			if ( !rustSequenceDecision.accepted )
+			{
+				if ( net_showdrop.GetInt() )
+				{
+					if ( rustSequenceDecision.reason == SOURCE_NET_PACKET_DUPLICATE )
+					{
+						ConMsg( "%s:duplicate packet %i at %i\n",
+							remote_address.ToString(), sequence, m_nInSequenceNr );
+					}
+					else if ( rustSequenceDecision.reason == SOURCE_NET_PACKET_OUT_OF_ORDER )
+					{
+						ConMsg( "%s:out of order packet %i at %i\n",
+							remote_address.ToString(), sequence, m_nInSequenceNr );
+					}
+					else if ( rustSequenceDecision.reason == SOURCE_NET_PACKET_EXCESSIVE_DROP )
+					{
+						ConMsg( "%s:Too many dropped packets (%i) at %i\n",
+							remote_address.ToString(), m_PacketDrop, sequence );
+					}
+				}
+				return -1;
+			}
+
+			if ( m_PacketDrop > 0 && net_showdrop.GetInt() )
+			{
+				ConMsg( "%s:Dropped %i packets at %i\n",
+					remote_address.ToString(), m_PacketDrop, sequence );
+			}
+		}
+		else
+		{
+			m_RustChannelId = 0;
 		}
 	}
 
-	int relState	= packet->message.ReadByte();	// reliable state of 8 subchannels
-	int nChoked		= 0;	// read later if choked flag is set
-	int i,j;
-
-	if ( flags & PACKET_FLAG_CHOKED )
-		nChoked = packet->message.ReadByte(); 
-
-	if ( flags & PACKET_FLAG_CHALLENGE )
+	if ( !bRustSequenceDecision )
 	{
-		unsigned int nChallenge = packet->message.ReadLong();
-		if ( nChallenge != m_ChallengeNr )
-			return -1;
-		// challenge was good, latch we saw a good one
-		m_bStreamContainsChallenge = true;
-	}
-	else if ( m_bStreamContainsChallenge )
-		return -1; // what, no challenge in this packet but we got them before?
-
+#endif
 	// discard stale or duplicated packets
 	if (sequence <= m_nInSequenceNr )
 	{
@@ -2323,6 +2581,9 @@ int CNetChan::ProcessPacketHeader( netpacket_t * packet )
 		}
 		return -1;
 	}
+#if defined( SOURCE_RUST_ENGINE )
+	}
+#endif
 
 
 	for ( i = 0; i<MAX_SUBCHANNELS; i++ )
@@ -2394,8 +2655,34 @@ int CNetChan::ProcessPacketHeader( netpacket_t * packet )
 		}
 	}
 
-	m_nInSequenceNr = sequence;
-	m_nOutSequenceNrAck = sequence_ack;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( bRustSequenceDecision )
+	{
+		SourceAbiNetPacketDecision committedDecision;
+		const SourceAbiStatus status = source_rust_bridge_net_channel_commit_incoming(
+			m_RustChannelId, sequence, sequence_ack, static_cast<uint32_t>( nChoked ),
+			net_maxpacketdrop.GetInt(), &committedDecision );
+		if ( status == SOURCE_ABI_OK && committedDecision.accepted )
+		{
+			m_nInSequenceNr = committedDecision.incoming_sequence;
+			m_nOutSequenceNrAck = committedDecision.outgoing_ack;
+			m_PacketDrop = committedDecision.dropped;
+		}
+		else
+		{
+			// Reliable acknowledgements were already applied above. Preserve the
+			// accepted native packet and fall back if the Rust context disappeared.
+			m_RustChannelId = 0;
+			m_nInSequenceNr = sequence;
+			m_nOutSequenceNrAck = sequence_ack;
+		}
+	}
+	else
+#endif
+	{
+		m_nInSequenceNr = sequence;
+		m_nOutSequenceNrAck = sequence_ack;
+	}
 	ETWReadPacket( packet->from.ToString(), packet->wiresize, m_nInSequenceNr, m_nOutSequenceNr );
 
 // Update waiting list status
@@ -3226,4 +3513,3 @@ bool CNetChan::IsValidFileForTransfer( const char *pszFilename )
 
 	return true;
 }
-

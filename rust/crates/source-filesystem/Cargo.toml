@@ -1,0 +1,13 @@
+[package]
+name = "source-filesystem"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file = "../../../LICENSE"
+
+[dependencies]
+source-pak = { path = "../source-pak" }
+source-vpk = { path = "../source-vpk" }
+
+[lints]
+workspace = true

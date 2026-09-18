@@ -63,6 +63,10 @@
 #include "filetracker.h"
 // #include "filesystem_init.h"
 
+#if defined( SOURCE_RUST_ENGINE )
+#include <atomic>
+#endif
+
 #if defined( SUPPORT_PACKED_STORE )
 #include "vpklib/packedstore.h"
 #endif
@@ -101,7 +105,8 @@ enum FileType_t
 	FT_PACK_BINARY,
 	FT_PACK_TEXT,
 	FT_MEMORY_BINARY,
-	FT_MEMORY_TEXT
+	FT_MEMORY_TEXT,
+	FT_RUST
 };
 
 class IThreadPool;
@@ -162,6 +167,9 @@ public:
 	int64				m_nLength;
 	FileType_t			m_type;
 	FILE				*m_pFile;
+#if defined( SOURCE_RUST_ENGINE )
+	uint64_t			m_RustFileHandle;
+#endif
 
 protected:
 	CBaseFileSystem		*m_fs;
@@ -655,6 +663,9 @@ public:
 													// that we don't return the same file more than once.
 		CUtlStringList		m_fileMatchesFromVPKOrPak;
 		CUtlStringList		m_dirMatchesFromVPKOrPak;
+#if defined( SOURCE_RUST_ENGINE )
+		uint64_t			m_RustFindHandle;
+#endif
 	};
 
 	friend class CSearchPath;
@@ -668,6 +679,9 @@ public:
 	CThreadMutex m_SearchPathsMutex;
 	CUtlVector< CSearchPath > m_SearchPaths;
 	CUtlVector<CPathIDInfo*> m_PathIDInfos;
+#if defined( SOURCE_RUST_ENGINE )
+	std::atomic<bool> m_bRustReadPathsSynchronized;
+#endif
 	CUtlLinkedList<FindData_t> m_FindData;
 
 	CSearchPath *FindSearchPathByStoreId( int storeId );
@@ -801,7 +815,14 @@ protected:
 	const char					*GetWritePath( const char *pFilename, const char *pathID );
 
 	// Computes a full write path
-	void						ComputeFullWritePath( char* pDest, int maxlen, const char *pWritePathID, char const *pRelativePath );
+	void						ComputeFullWritePath( char* pDest, int maxlen, const char *pRelativePath, char const *pWritePathID );
+#if defined( SOURCE_RUST_ENGINE )
+	void						SyncRustReadPaths();
+	void						SyncRustWritePaths();
+	bool						LegacyPackContainsFile( const char *pFileName, const char *pPathID );
+	bool						TryRustReadFileSize( const char *pFileName, const char *pPathID, uint64_t *pSize );
+	bool						TryRustResolveReadPath( const char *pFileName, const char *pPathID, PathTypeFilter_t pathFilter, OUT_Z_CAP(maxLenInChars) char *pDest, int maxLenInChars, PathTypeQuery_t *pPathType );
+#endif
 
 	void						AddSearchPathInternal( const char *pPath, const char *pathID, SearchPathAdd_t addType, bool bAddPackFiles );
 

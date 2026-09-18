@@ -619,6 +619,11 @@ extern const char	*UTIL_FunctionToName( datamap_t *pMap, inputfunc_t function );
 
 int UTIL_GetCommandClientIndex( void );
 CBasePlayer *UTIL_GetCommandClient( void );
+// Like UTIL_GetCommandClient, but resolves the listen-server host when a
+// command arrived without an issuing client, such as from the developer
+// console, a config file, or a test script. Still returns NULL on a dedicated
+// server or before a player exists, so callers must check the result.
+CBasePlayer *UTIL_GetCommandClientOrHost( void );
 bool UTIL_GetModDir( char *lpszTextOut, unsigned int nSize );
 
 AngularImpulse WorldToLocalRotation( const VMatrix &localToWorld, const Vector &worldAxis, float rotation );

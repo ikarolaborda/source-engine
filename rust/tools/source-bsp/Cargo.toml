@@ -1,0 +1,17 @@
+[package]
+name = "source-bsp-tool"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file = "../../../LICENSE"
+
+[[bin]]
+name = "source-bsp"
+path = "src/main.rs"
+
+[dependencies]
+source-bsp = { path = "../../crates/source-bsp" }
+
+[lints]
+workspace = true
+

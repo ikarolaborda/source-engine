@@ -22,6 +22,11 @@
 #include "tier2/tier2.h"
 #include "zip_utils.h"
 #include "packfile.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "rust_engine_bridge.h"
+#include <atomic>
+#include <limits.h>
+#endif
 #ifdef _X360
 #include "xbox/xbox_launch.h"
 #endif
@@ -308,6 +313,9 @@ CBaseFileSystem::CBaseFileSystem()
 	g_pFullFileSystem = this;
 
 	m_WhitelistFileTrackingEnabled = -1;
+#if defined( SOURCE_RUST_ENGINE )
+	m_bRustReadPathsSynchronized.store( false, std::memory_order_relaxed );
+#endif
 
 	// If this changes then FileNameHandleInternal_t/FileNameHandle_t needs to be fixed!!!
 	Assert( sizeof( CUtlSymbol ) == sizeof( short ) );
@@ -521,10 +529,242 @@ void CBaseFileSystem::Shutdown()
 //-----------------------------------------------------------------------------
 inline void CBaseFileSystem::ComputeFullWritePath( char* pDest, int maxlen, const char *pRelativePath, const char *pWritePathID )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( pDest && maxlen > 1 && pRelativePath && pRelativePath[0] )
+	{
+		uint64_t rustWritten = 0;
+		const uint64_t pathIDLength = pWritePathID ? Q_strlen( pWritePathID ) : 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_resolve_write_path(
+			pRelativePath, Q_strlen( pRelativePath ), pWritePathID, pathIDLength,
+			pDest, static_cast<uint64_t>( maxlen - 1 ), &rustWritten );
+		if ( rustStatus == SOURCE_ABI_OK && rustWritten < static_cast<uint64_t>( maxlen ) )
+		{
+			pDest[rustWritten] = '\0';
+			static std::atomic<bool> s_ReportedRustWritePath( false );
+			if ( !s_ReportedRustWritePath.exchange( true, std::memory_order_relaxed ) )
+			{
+				Msg( "Rust filesystem write path active: %s\n", pDest );
+			}
+			return;
+		}
+	}
+#endif
 	Q_strncpy( pDest, GetWritePath( pRelativePath, pWritePathID ), maxlen );
 	Q_strncat( pDest, pRelativePath, maxlen, COPY_ALL_CHARACTERS );
 	Q_FixSlashes( pDest );
 }
+
+#if defined( SOURCE_RUST_ENGINE )
+void CBaseFileSystem::SyncRustReadPaths()
+{
+	m_bRustReadPathsSynchronized.store( false, std::memory_order_release );
+	if ( source_rust_bridge_read_paths_clear() != SOURCE_ABI_OK )
+		return;
+
+	uint32_t directoryCount = 0;
+	uint32_t vpkCount = 0;
+	uint32_t legacyPackCount = 0;
+	for ( int i = 0; i < m_SearchPaths.Count(); ++i )
+	{
+		const CSearchPath &searchPath = m_SearchPaths[i];
+		const char *pathID = searchPath.GetPathIDString();
+		if ( !pathID )
+			continue;
+		const bool byRequestOnly = searchPath.m_pPathIDInfo &&
+			searchPath.m_pPathIDInfo->m_bByRequestOnly;
+		SourceAbiStatus status = SOURCE_ABI_OK;
+		if ( searchPath.GetPackFile() )
+		{
+			++legacyPackCount;
+			continue;
+		}
+		if ( searchPath.GetPackedStore() )
+		{
+			CPackedStoreRefCount *packedStore = searchPath.GetPackedStore();
+			char vpkPath[MAX_FILEPATH];
+			Q_snprintf( vpkPath, sizeof( vpkPath ), "%s_dir.vpk", packedStore->BaseName() );
+			struct _stat vpkDirectoryStat;
+			if ( FS_stat( vpkPath, &vpkDirectoryStat ) == -1 )
+				Q_strncpy( vpkPath, packedStore->FullPathName(), sizeof( vpkPath ) );
+			if ( !vpkPath[0] )
+				continue;
+			status = source_rust_bridge_read_path_add_vpk_flags( vpkPath,
+				Q_strlen( vpkPath ), pathID, Q_strlen( pathID ), false, byRequestOnly );
+			++vpkCount;
+		}
+		else
+		{
+			const char *root = searchPath.GetPathString();
+			if ( !root || !root[0] )
+				continue;
+			status = source_rust_bridge_read_path_add_directory_flags( root,
+				Q_strlen( root ), pathID, Q_strlen( pathID ), false, byRequestOnly, true );
+			++directoryCount;
+		}
+		if ( status != SOURCE_ABI_OK )
+		{
+			const char *failedPath = searchPath.GetPackedStore()
+				? searchPath.GetPackedStore()->FullPathName()
+				: searchPath.GetPathString();
+			Warning( FILESYSTEM_WARNING,
+				"Rust filesystem read path synchronization failed for %s (%s, status %d)\n",
+				failedPath ? failedPath : "<unknown>", pathID, status );
+			source_rust_bridge_read_paths_clear();
+			return;
+		}
+	}
+
+	m_bRustReadPathsSynchronized.store( true, std::memory_order_release );
+	if ( vpkCount >= 5 && directoryCount != 0 )
+	{
+		static std::atomic<bool> s_ReportedRustReadSync( false );
+		if ( !s_ReportedRustReadSync.exchange( true, std::memory_order_relaxed ) )
+		{
+			Msg( "Rust filesystem read paths synchronized: %u directories, %u VPKs, %u legacy packs guarded\n",
+				directoryCount, vpkCount, legacyPackCount );
+		}
+	}
+	if ( legacyPackCount != 0 )
+	{
+		static std::atomic<bool> s_ReportedRustLegacyPackGuard( false );
+		if ( !s_ReportedRustLegacyPackGuard.exchange( true, std::memory_order_relaxed ) )
+			Msg( "Rust filesystem legacy pack precedence guard synchronized: %u packs\n",
+				legacyPackCount );
+	}
+}
+
+void CBaseFileSystem::SyncRustWritePaths()
+{
+	if ( source_rust_bridge_write_paths_clear() != SOURCE_ABI_OK )
+		return;
+
+	for ( int i = 0; i < m_SearchPaths.Count(); ++i )
+	{
+		const CSearchPath &searchPath = m_SearchPaths[i];
+		if ( searchPath.GetPackFile() || searchPath.GetPackedStore() )
+			continue;
+		const char *root = searchPath.GetPathString();
+		const char *pathID = searchPath.GetPathIDString();
+		if ( !root || !root[0] || !pathID )
+			continue;
+		source_rust_bridge_write_path_add_flags( root, Q_strlen( root ), pathID,
+			Q_strlen( pathID ), false,
+			searchPath.m_pPathIDInfo && searchPath.m_pPathIDInfo->m_bByRequestOnly );
+	}
+}
+
+bool CBaseFileSystem::LegacyPackContainsFile( const char *pFileName, const char *pPathID )
+{
+	const char *iteratedFileName = pFileName;
+	CSearchPathsIterator iterator( this, &iteratedFileName, pPathID, FILTER_CULLNONPACK );
+	for ( CSearchPath *searchPath = iterator.GetFirst(); searchPath;
+		searchPath = iterator.GetNext() )
+	{
+		CPackFile *pack = searchPath->GetPackFile();
+		if ( pack && pack->ContainsFile( iteratedFileName ) )
+			return true;
+	}
+	return false;
+}
+
+bool CBaseFileSystem::TryRustReadFileSize( const char *pFileName, const char *pPathID,
+	uint64_t *pSize )
+{
+	if ( !pFileName || !pFileName[0] || !pSize ||
+		!m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) ||
+		m_WhitelistFileTrackingEnabled != 0 )
+	{
+		return false;
+	}
+
+	char tempPathID[MAX_PATH];
+	ParsePathID( pFileName, pPathID, tempPathID );
+	if ( !pFileName[0] || Q_IsAbsolutePath( pFileName ) ||
+		LegacyPackContainsFile( pFileName, pPathID ) )
+	{
+		return false;
+	}
+
+	uint64_t size = 0;
+	const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+	if ( source_rust_bridge_file_size( pFileName, Q_strlen( pFileName ), pPathID,
+		pathIDLength, &size ) != SOURCE_ABI_OK )
+	{
+		// A native memory file or a special legacy source can still satisfy a
+		// miss, so only a positive Rust lookup is authoritative here.
+		return false;
+	}
+
+	*pSize = size;
+	static std::atomic<bool> s_ReportedRustMetadata( false );
+	if ( !s_ReportedRustMetadata.exchange( true, std::memory_order_relaxed ) )
+	{
+		Msg( "Rust filesystem metadata active: %s (%llu bytes)\n", pFileName,
+			static_cast<unsigned long long>( size ) );
+	}
+	return true;
+}
+
+bool CBaseFileSystem::TryRustResolveReadPath( const char *pFileName, const char *pPathID,
+	PathTypeFilter_t pathFilter, OUT_Z_CAP(maxLenInChars) char *pDest, int maxLenInChars,
+	PathTypeQuery_t *pPathType )
+{
+	if ( !pFileName || !pFileName[0] || !pDest || maxLenInChars <= 0 ||
+		!m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) ||
+		m_WhitelistFileTrackingEnabled != 0 ||
+		Q_IsAbsolutePath( pFileName ) ||
+		LegacyPackContainsFile( pFileName, pPathID ) )
+	{
+		return false;
+	}
+
+	char resolved[MAX_FILEPATH];
+	uint64_t written = 0;
+	uint32_t kind = SOURCE_READ_PATH_DISK;
+	const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+	if ( source_rust_bridge_resolve_read_path( pFileName, Q_strlen( pFileName ), pPathID,
+		pathIDLength, resolved, sizeof( resolved ) - 1, &written, &kind ) != SOURCE_ABI_OK )
+	{
+		// A miss is never authoritative: legacy ZIP packs, memory files and
+		// platform-specific sources can still satisfy the request.
+		return false;
+	}
+	if ( written >= sizeof( resolved ) )
+		return false;
+	resolved[written] = '\0';
+
+	// Honour the caller's pack filter with the same precedence the legacy
+	// iterator applies, otherwise fall back so nothing is silently reordered.
+	// A map's embedded archive is a pack as much as a VPK is, so a caller
+	// asking for loose files only must not be handed one.
+	if ( kind == SOURCE_READ_PATH_VPK || kind == SOURCE_READ_PATH_PAK )
+	{
+		if ( pathFilter == FILTER_CULLPACK )
+			return false;
+	}
+	else if ( pathFilter == FILTER_CULLNONPACK )
+	{
+		return false;
+	}
+
+	if ( static_cast<int>( written ) >= maxLenInChars )
+	{
+		::Warning( "File %s resolved to %s, but the result won't fit in the caller's buffer of %d bytes\n",
+			pFileName, resolved, maxLenInChars );
+		return false;
+	}
+
+	V_strncpy( pDest, resolved, maxLenInChars );
+	V_FixSlashes( pDest );
+	if ( pPathType )
+		*pPathType = PATH_IS_NORMAL;
+
+	static std::atomic<bool> s_ReportedRustResolve( false );
+	if ( !s_ReportedRustResolve.exchange( true, std::memory_order_relaxed ) )
+		Msg( "Rust filesystem path resolution active: %s -> %s\n", pFileName, pDest );
+	return true;
+}
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -888,7 +1128,12 @@ bool CBaseFileSystem::AddPackFile( const char *pFileName, const char *pathID )
 	CHECK_DOUBLE_SLASHES( pFileName );
 
 	AsyncFinishAll();
-	return AddPackFileFromPath( "", pFileName, true, pathID );
+	const bool added = AddPackFileFromPath( "", pFileName, true, pathID );
+#if defined( SOURCE_RUST_ENGINE )
+	if ( added )
+		SyncRustReadPaths();
+#endif
+	return added;
 }
 
 //-----------------------------------------------------------------------------
@@ -1577,6 +1822,11 @@ void CBaseFileSystem::AddSearchPath( const char *pPath, const char *pathID, Sear
 		}
 #endif
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	SyncRustReadPaths();
+	SyncRustWritePaths();
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1656,7 +1906,12 @@ bool CBaseFileSystem::RemoveSearchPath( const char *pPath, const char *pathID )
 		}
 		else if ( V_stristr( newPath, ".vpk" ) )
 		{
-			return RemoveVPKFile( newPath, pathID );
+			const bool removed = RemoveVPKFile( newPath, pathID );
+#if defined( SOURCE_RUST_ENGINE )
+			if ( removed )
+				SyncRustReadPaths();
+#endif
+			return removed;
 		}
 		else
 		{
@@ -1683,6 +1938,13 @@ bool CBaseFileSystem::RemoveSearchPath( const char *pPath, const char *pathID )
 		m_SearchPaths.Remove( i );
 		bret = true;
 	}
+#if defined( SOURCE_RUST_ENGINE )
+	if ( bret )
+	{
+		SyncRustReadPaths();
+		SyncRustWritePaths();
+	}
+#endif
 	return bret;
 }
 
@@ -1703,6 +1965,10 @@ void CBaseFileSystem::RemoveSearchPaths( const char *pathID )
 			m_SearchPaths.FastRemove(i);
 		}
 	}
+#if defined( SOURCE_RUST_ENGINE )
+	SyncRustReadPaths();
+	SyncRustWritePaths();
+#endif
 }
 
 
@@ -2122,6 +2388,10 @@ void CBaseFileSystem::RemoveAllSearchPaths( void )
 {
 	AUTO_LOCK( m_SearchPathsMutex );
 	m_SearchPaths.Purge();
+#if defined( SOURCE_RUST_ENGINE )
+	SyncRustReadPaths();
+	SyncRustWritePaths();
+#endif
 	//m_PackFileHandles.Purge();
 }
 
@@ -2386,6 +2656,11 @@ FileHandle_t CBaseFileSystem::OpenForRead( const char *pFileNameT, const char *p
 
 	FixUpPath ( pFileNameT, pFileNameBuff, sizeof( pFileNameBuff ) );		
 
+	// Every early return below has to leave the caller with a defined pointer,
+	// so clear it before any fast path can answer the request.
+	if ( ppszResolvedFilename )
+		*ppszResolvedFilename = NULL;
+
 	// Try the memory cache for un-restricted searches or "GAME" items.
 	if ( !pathID || Q_stricmp( pathID, "GAME" ) == 0 )
 	{
@@ -2419,6 +2694,55 @@ FileHandle_t CBaseFileSystem::OpenForRead( const char *pFileNameT, const char *p
 			DevWarning("blocking load %s\n", pFileName);
 		}
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	// Serve ordinary relative content through the synchronized ordered
+	// loose/VPK mounts. Legacy ZIP/BSP packs retain an explicit precedence
+	// guard until their archive format is owned by Rust too.
+	if ( m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) &&
+		!V_IsAbsolutePath( pFileName ) && !( flags & FSOPEN_NEVERINPACK ) &&
+		m_WhitelistFileTrackingEnabled == 0 &&
+		!LegacyPackContainsFile( pFileName, pathID ) )
+	{
+		uint64_t rustFile = 0;
+		uint64_t rustFileBytes = 0;
+		const uint64_t pathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_file_open_read( pFileName,
+			Q_strlen( pFileName ), pathID, pathIDLength, &rustFile, &rustFileBytes );
+		if ( rustStatus == SOURCE_ABI_OK && rustFileBytes <= INT_MAX )
+		{
+			CFileHandle *pFile = new CFileHandle( this );
+			pFile->m_type = FT_RUST;
+			pFile->m_RustFileHandle = rustFile;
+			pFile->m_nLength = static_cast<int64>( rustFileBytes );
+#if !defined( _RETAIL )
+			pFile->SetName( pFileName );
+#endif
+			if ( ppszResolvedFilename )
+			{
+				char resolved[MAX_FILEPATH];
+				if ( TryRustResolveReadPath( pFileName, pathID, FILTER_NONE, resolved,
+					sizeof( resolved ), NULL ) )
+				{
+					// Ownership matches the legacy strdup contract so callers
+					// keep releasing the name with free().
+					*ppszResolvedFilename = strdup( resolved );
+				}
+			}
+
+			static std::atomic<bool> s_ReportedRustRead( false );
+			if ( !s_ReportedRustRead.exchange( true, std::memory_order_relaxed ) )
+			{
+				Msg( "Rust filesystem read active: %s (%llu bytes)\n", pFileName,
+					static_cast<unsigned long long>( rustFileBytes ) );
+				Msg( "Rust filesystem read handle active: %s\n", pFileName );
+			}
+			return static_cast<FileHandle_t>( pFile );
+		}
+		if ( rustStatus == SOURCE_ABI_OK && rustFile != 0 )
+			source_rust_bridge_file_close( rustFile );
+	}
+#endif
 
 	CFileOpenInfo openInfo( this, pFileName, NULL, pOptions, flags, ppszResolvedFilename );
 
@@ -2572,7 +2896,8 @@ FileHandle_t CBaseFileSystem::OpenForWrite( const char *pFileName, const char *p
 	// Unless an absolute path is specified...
 	const char *pTmpFileName;
 	char szScratchFileName[MAX_PATH];
-	if ( Q_IsAbsolutePath( pFileName ) )
+	const bool bAbsolutePath = Q_IsAbsolutePath( pFileName );
+	if ( bAbsolutePath )
 	{
 		pTmpFileName = pFileName;
 	}
@@ -2581,6 +2906,37 @@ FileHandle_t CBaseFileSystem::OpenForWrite( const char *pFileName, const char *p
 		ComputeFullWritePath( szScratchFileName, sizeof( szScratchFileName ), pFileName, pathID );
 		pTmpFileName = szScratchFileName; 
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !bAbsolutePath )
+	{
+		uint64_t rustFile = 0;
+		uint64_t rustSize = 0;
+		const uint64_t pathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_file_open_write(
+			pFileName, Q_strlen( pFileName ), pathID, pathIDLength,
+			pOptions, Q_strlen( pOptions ), &rustFile, &rustSize );
+		if ( rustStatus == SOURCE_ABI_OK && rustFile != 0 && rustSize <= INT64_MAX )
+		{
+			CFileHandle *fh = new CFileHandle( this );
+			fh->m_nLength = static_cast<int64>( rustSize );
+			fh->m_type = FT_RUST;
+			fh->m_RustFileHandle = rustFile;
+#if !defined( _RETAIL )
+			fh->SetName( pTmpFileName );
+#endif
+			static std::atomic<bool> s_ReportedRustWriteHandle( false );
+			if ( !s_ReportedRustWriteHandle.exchange( true, std::memory_order_relaxed ) )
+			{
+				Msg( "Rust filesystem write handle active: %s\n", pTmpFileName );
+			}
+			LogAccessToFile( "open", pTmpFileName, pOptions );
+			return static_cast<FileHandle_t>( fh );
+		}
+		if ( rustStatus == SOURCE_ABI_OK && rustFile != 0 )
+			source_rust_bridge_file_close( rustFile );
+	}
+#endif
 
 	int64 size;
 	FILE *fp = Trace_FOpen( pTmpFileName, pOptions, 0, &size );
@@ -2783,6 +3139,12 @@ unsigned int CBaseFileSystem::Size( const char* pFileName, const char *pPathID )
 		Warning( FILESYSTEM_WARNING, "FS:  Tried to Size NULL filename!\n" );
 		return 0;
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	uint64_t rustSize = 0;
+	if ( TryRustReadFileSize( pFileName, pPathID, &rustSize ) && rustSize <= UINT_MAX )
+		return static_cast<unsigned int>( rustSize );
+#endif
 	
 	// Ok, fall through to the fast path.
 	unsigned result = 0;
@@ -3751,6 +4113,12 @@ bool CBaseFileSystem::FileExists( const char *pFileName, const char *pPathID )
 
 	CHECK_DOUBLE_SLASHES( pFileName );
 
+#if defined( SOURCE_RUST_ENGINE )
+	uint64_t rustSize = 0;
+	if ( TryRustReadFileSize( pFileName, pPathID, &rustSize ) )
+		return true;
+#endif
+
 	FileHandle_t h = Open( pFileName, "rb", pPathID );
 	if ( h )
 	{
@@ -3769,6 +4137,25 @@ bool CBaseFileSystem::IsFileWritable( char const *pFileName, char const *pPathID
 
 	char tempPathID[MAX_PATH];
 	ParsePathID( pFileName, pPathID, tempPathID );
+
+	#if defined( SOURCE_RUST_ENGINE )
+	if ( !Q_IsAbsolutePath( pFileName ) )
+	{
+		uint32_t writable = 0;
+		const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+		const SourceAbiStatus status = source_rust_bridge_is_write_file_writable(
+			pFileName, Q_strlen( pFileName ), pPathID, pathIDLength, &writable );
+		if ( status == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustWritableQuery( false );
+			if ( !s_ReportedRustWritableQuery.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem writability query active: %s\n", pFileName );
+			return writable != 0;
+		}
+		if ( status == SOURCE_ABI_NOT_FOUND )
+			return false;
+	}
+	#endif
 
 	if ( Q_IsAbsolutePath( pFileName ) )
 	{
@@ -3831,6 +4218,24 @@ bool CBaseFileSystem::SetFileWritable( char const *pFileName, bool writable, con
 	char tempPathID[MAX_PATH];
 	ParsePathID( pFileName, pPathID, tempPathID );
 
+	#if defined( SOURCE_RUST_ENGINE )
+	if ( !Q_IsAbsolutePath( pFileName ) )
+	{
+		const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+		const SourceAbiStatus status = source_rust_bridge_set_write_file_writable(
+			pFileName, Q_strlen( pFileName ), pPathID, pathIDLength, writable );
+		if ( status == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustWritableChange( false );
+			if ( !s_ReportedRustWritableChange.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem writability change active: %s\n", pFileName );
+			return true;
+		}
+		if ( status == SOURCE_ABI_NOT_FOUND )
+			return false;
+	}
+	#endif
+
 	if ( Q_IsAbsolutePath( pFileName ) )
 	{
 		return ( FS_chmod( pFileName, pmode ) == 0 );
@@ -3882,6 +4287,26 @@ bool CBaseFileSystem::IsDirectory( const char *pFileName, const char *pathID )
 		}
 		return false;
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) )
+	{
+		char rustPath[MAX_PATH];
+		FixUpPath( pFileName, rustPath, sizeof( rustPath ) );
+		uint32_t isDirectory = 0;
+		const uint64_t pathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		const SourceAbiStatus status = source_rust_bridge_path_is_directory( rustPath,
+			Q_strlen( rustPath ), pathID, pathIDLength, &isDirectory );
+		if ( status == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustDirectoryQuery( false );
+			if ( !s_ReportedRustDirectoryQuery.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem directory query active: %s (%s)\n", rustPath,
+					isDirectory ? "directory" : "not directory" );
+			return isDirectory != 0;
+		}
+	}
+#endif
 
 	CSearchPathsIterator iter( this, &pFileName, pathID, FILTER_CULLPACK );
 	for ( CSearchPath *pSearchPath = iter.GetFirst(); pSearchPath != NULL; pSearchPath = iter.GetNext() )
@@ -3937,6 +4362,17 @@ void CBaseFileSystem::CreateDirHierarchy( const char *pRelativePathT, const char
 	{
 		Assert( pathID );
 
+#if defined( SOURCE_RUST_ENGINE )
+		const uint64_t pathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		if ( source_rust_bridge_create_write_directory( pRelativePath,
+			Q_strlen( pRelativePath ), pathID, pathIDLength ) == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustCreateDirectory( false );
+			if ( !s_ReportedRustCreateDirectory.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem directory creation active: %s\n", pRelativePath );
+			return;
+		}
+#endif
 
 		ComputeFullWritePath( szScratchFileName, sizeof( szScratchFileName ), pRelativePath, pathID );
 	}
@@ -4007,6 +4443,37 @@ const char *CBaseFileSystem::FindFirstHelper( const char *pWildCardT, const char
 	pFindData->wildCardString.AddMultipleToTail( maxlen );
 	Q_strncpy( pFindData->wildCardString.Base(), pWildCard, maxlen );
 	pFindData->findHandle = INVALID_HANDLE_VALUE;
+#if defined( SOURCE_RUST_ENGINE )
+	pFindData->m_RustFindHandle = 0;
+	if ( !Q_IsAbsolutePath( pWildCard ) &&
+		m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) )
+	{
+		uint64_t rustFind = 0;
+		uint64_t rustNameLength = 0;
+		uint32_t rustIsDirectory = 0;
+		const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_find_first(
+			pWildCard, Q_strlen( pWildCard ), pPathID, pathIDLength,
+			pFindData->findData.cFileName, sizeof( pFindData->findData.cFileName ) - 1,
+			&rustNameLength, &rustIsDirectory, &rustFind );
+		if ( rustStatus == SOURCE_ABI_OK && rustFind != 0 &&
+			rustNameLength < sizeof( pFindData->findData.cFileName ) )
+		{
+			pFindData->findData.cFileName[rustNameLength] = '\0';
+			pFindData->findData.dwFileAttributes = rustIsDirectory ?
+				FILE_ATTRIBUTE_DIRECTORY : 0;
+			pFindData->m_RustFindHandle = rustFind;
+			pFindData->currentSearchPathID = -1;
+			*pHandle = hTmpHandle;
+			static std::atomic<bool> s_ReportedRustFind( false );
+			if ( !s_ReportedRustFind.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem wildcard search active: %s\n", pWildCard );
+			return pFindData->findData.cFileName;
+		}
+		if ( rustFind != 0 )
+			source_rust_bridge_find_close( rustFind );
+	}
+#endif
 
 	if ( Q_IsAbsolutePath( pWildCard ) )
 	{
@@ -4233,6 +4700,27 @@ const char *CBaseFileSystem::FindNext( FileFindHandle_t handle )
 	VPROF_BUDGET( "CBaseFileSystem::FindNext", VPROF_BUDGETGROUP_OTHER_FILESYSTEM );
 	FindData_t *pFindData = &m_FindData[handle];
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( pFindData->m_RustFindHandle != 0 )
+	{
+		uint64_t rustNameLength = 0;
+		uint32_t rustIsDirectory = 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_find_next(
+			pFindData->m_RustFindHandle, pFindData->findData.cFileName,
+			sizeof( pFindData->findData.cFileName ) - 1, &rustNameLength,
+			&rustIsDirectory );
+		if ( rustStatus != SOURCE_ABI_OK ||
+			rustNameLength >= sizeof( pFindData->findData.cFileName ) )
+		{
+			return NULL;
+		}
+		pFindData->findData.cFileName[rustNameLength] = '\0';
+		pFindData->findData.dwFileAttributes = rustIsDirectory ?
+			FILE_ATTRIBUTE_DIRECTORY : 0;
+		return pFindData->findData.cFileName;
+	}
+#endif
+
 	while( 1 )
 	{
 		if( FindNextFileHelper( pFindData, NULL ) )
@@ -4272,6 +4760,14 @@ void CBaseFileSystem::FindClose( FileFindHandle_t handle )
 
 	FindData_t *pFindData = &m_FindData[handle];
 	Assert(pFindData);
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( pFindData->m_RustFindHandle != 0 )
+	{
+		source_rust_bridge_find_close( pFindData->m_RustFindHandle );
+		pFindData->m_RustFindHandle = 0;
+	}
+#endif
 
 	if ( pFindData->findHandle != INVALID_HANDLE_VALUE)
 	{
@@ -4378,6 +4874,11 @@ const char *CBaseFileSystem::RelativePathToFullPath( const char *pFileName, cons
 
 	// Fill in the default in case it's not found...
 	V_strncpy( pDest, pFileName, maxLenInChars );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( TryRustResolveReadPath( pFileName, pPathID, pathFilter, pDest, maxLenInChars, pPathType ) )
+		return pDest;
+#endif
 
 // @FD This is arbitrary and seems broken.  If the caller needs this filter, they should
 //     request it with the flag themselves.  As it is, I cannot search all the file paths
@@ -4648,6 +5149,21 @@ void CBaseFileSystem::RemoveFile( char const* pRelativePath, const char *pathID 
 
 	Assert( pathID || !IsX360() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !Q_IsAbsolutePath( pRelativePath ) )
+	{
+		const uint64_t pathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		if ( source_rust_bridge_remove_write_file( pRelativePath,
+			Q_strlen( pRelativePath ), pathID, pathIDLength ) == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustRemoveFile( false );
+			if ( !s_ReportedRustRemoveFile.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem file removal active: %s\n", pRelativePath );
+			return;
+		}
+	}
+#endif
+
 	// Opening for write or append uses Write Path
 	char szScratchFileName[MAX_PATH];
 	if ( Q_IsAbsolutePath( pRelativePath ) )
@@ -4693,6 +5209,31 @@ bool CBaseFileSystem::RenameFile( char const *pOldPath, char const *pNewPath, co
 	char tempNewPathID[MAX_PATH];
 	ParsePathID( pNewPath, pathID, tempNewPathID );
 	Assert( pathID );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !Q_IsAbsolutePath( pOldPath ) && !Q_IsAbsolutePath( pNewPath ) )
+	{
+		const uint64_t oldPathIDLength = pOldPathId ? Q_strlen( pOldPathId ) : 0;
+		const uint64_t newPathIDLength = pathID ? Q_strlen( pathID ) : 0;
+		const SourceAbiStatus status = source_rust_bridge_rename_write_file(
+			pOldPath, Q_strlen( pOldPath ), pOldPathId, oldPathIDLength,
+			pNewPath, Q_strlen( pNewPath ), pathID, newPathIDLength );
+		if ( status == SOURCE_ABI_OK )
+		{
+			static std::atomic<bool> s_ReportedRustRename( false );
+			if ( !s_ReportedRustRename.exchange( true, std::memory_order_relaxed ) )
+				Msg( "Rust filesystem file rename active: %s -> %s\n", pOldPath, pNewPath );
+			return true;
+		}
+		if ( status == SOURCE_ABI_NOT_FOUND || status == SOURCE_ABI_IO_ERROR ||
+			status == SOURCE_ABI_FORMAT_ERROR )
+		{
+			Warning( FILESYSTEM_WARNING, "Unable to rename %s to %s through Rust filesystem!\n",
+				pOldPath, pNewPath );
+			return false;
+		}
+	}
+#endif
 
 	char pNewFileName[ MAX_PATH ];
 	char szScratchFileName[MAX_PATH];
@@ -5185,6 +5726,10 @@ CBaseFileSystem::CPathIDInfo* CBaseFileSystem::FindOrAddPathIDInfo( const CUtlSy
 void CBaseFileSystem::MarkPathIDByRequestOnly( const char *pPathID, bool bRequestOnly )
 {
 	FindOrAddPathIDInfo( g_PathIDTable.AddString( pPathID ), bRequestOnly );
+#if defined( SOURCE_RUST_ENGINE )
+	SyncRustReadPaths();
+	SyncRustWritePaths();
+#endif
 }
 
 #if defined( TRACK_BLOCKING_IO )
@@ -5408,6 +5953,14 @@ CFileHandle::~CFileHandle()
 	delete[] m_pszTrueFileName;
 #endif
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST && m_RustFileHandle != 0 )
+	{
+		source_rust_bridge_file_close( m_RustFileHandle );
+		m_RustFileHandle = 0;
+	}
+#endif
+
 	if ( m_pPackFileHandle )
 	{
 		delete m_pPackFileHandle;
@@ -5430,6 +5983,9 @@ void CFileHandle::Init( CBaseFileSystem *fs )
 	m_nLength = 0;
 	m_type = FT_NORMAL;		
 	m_pPackFileHandle = NULL;
+#if defined( SOURCE_RUST_ENGINE )
+	m_RustFileHandle = 0;
+#endif
 
 	m_fs = fs;
 
@@ -5459,6 +6015,12 @@ int CFileHandle::GetSectorSize()
 	{
 		return 1;
 	}
+#if defined( SOURCE_RUST_ENGINE )
+	else if ( m_type == FT_RUST )
+	{
+		return 1;
+	}
+#endif
 	else
 	{
 		return -1;
@@ -5467,6 +6029,15 @@ int CFileHandle::GetSectorSize()
 
 bool CFileHandle::IsOK()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		uint32_t open = 0;
+		return m_RustFileHandle != 0 &&
+			source_rust_bridge_file_is_open( m_RustFileHandle, &open ) == SOURCE_ABI_OK &&
+			open != 0;
+	}
+#endif
 #if defined( SUPPORT_PACKED_STORE )
 	if ( m_VPKHandle )
 	{
@@ -5490,6 +6061,13 @@ void CFileHandle::Flush()
 {
 	Assert( IsValid() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		source_rust_bridge_file_flush( m_RustFileHandle );
+		return;
+	}
+#endif
 	if ( m_pFile )
 	{
 		m_fs->FS_fflush( m_pFile );
@@ -5500,6 +6078,10 @@ void CFileHandle::SetBufferSize( int nBytes )
 {
 	Assert( IsValid() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+		return;
+#endif
 	if ( m_pFile )
 	{
 		m_fs->FS_setbufsize( m_pFile, nBytes );
@@ -5519,6 +6101,21 @@ int CFileHandle::Read( void* pBuffer, int nLength )
 int CFileHandle::Read( void* pBuffer, int nDestSize, int nLength )
 {
 	Assert( IsValid() );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		if ( nLength < 0 )
+			return 0;
+		if ( nDestSize >= 0 )
+			nLength = MIN( nLength, nDestSize );
+		uint64_t rustRead = 0;
+		return source_rust_bridge_file_read( m_RustFileHandle, pBuffer,
+			static_cast<uint64_t>( nLength ), &rustRead ) == SOURCE_ABI_OK &&
+			rustRead <= static_cast<uint64_t>( INT_MAX )
+			? static_cast<int>( rustRead ) : 0;
+	}
+#endif
 
 #if defined( SUPPORT_PACKED_STORE )
 	if ( m_VPKHandle )
@@ -5556,6 +6153,19 @@ int CFileHandle::Write( const void* pBuffer, int nLength )
 
 	Assert( IsValid() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		if ( nLength < 0 )
+			return 0;
+		uint64_t rustWritten = 0;
+		return source_rust_bridge_file_write( m_RustFileHandle, pBuffer,
+			static_cast<uint64_t>( nLength ), &rustWritten ) == SOURCE_ABI_OK &&
+			rustWritten <= static_cast<uint64_t>( INT_MAX )
+			? static_cast<int>( rustWritten ) : 0;
+	}
+#endif
+
 	if ( !m_pFile )
 	{
 		m_fs->Warning( FILESYSTEM_WARNING, "FS:  Tried to Write NULL file pointer inside valid file handle!\n" );
@@ -5572,6 +6182,15 @@ int CFileHandle::Write( const void* pBuffer, int nLength )
 int CFileHandle::Seek( int64 nOffset, int nWhence )
 {
 	Assert( IsValid() );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		uint64_t rustPosition = 0;
+		return source_rust_bridge_file_seek( m_RustFileHandle, nOffset,
+			static_cast<uint32_t>( nWhence ), &rustPosition ) == SOURCE_ABI_OK ? 0 : -1;
+	}
+#endif
 
 #if defined( SUPPORT_PACKED_STORE )
 	if ( m_VPKHandle )
@@ -5601,6 +6220,16 @@ int CFileHandle::Tell()
 {
 	Assert( IsValid() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		uint64_t rustPosition = 0;
+		return source_rust_bridge_file_tell( m_RustFileHandle, &rustPosition ) == SOURCE_ABI_OK &&
+			rustPosition <= static_cast<uint64_t>( INT_MAX )
+			? static_cast<int>( rustPosition ) : -1;
+	}
+#endif
+
 #if defined( SUPPORT_PACKED_STORE )
 	if ( m_VPKHandle )
 	{
@@ -5628,6 +6257,16 @@ int CFileHandle::Size()
 	Assert( IsValid() );
 
 	int nReturnedSize = -1;
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_type == FT_RUST )
+	{
+		uint64_t rustSize = 0;
+		return source_rust_bridge_open_file_size( m_RustFileHandle, &rustSize ) == SOURCE_ABI_OK &&
+			rustSize <= static_cast<uint64_t>( INT_MAX )
+			? static_cast<int>( rustSize ) : -1;
+	}
+#endif
 
 #if defined( SUPPORT_PACKED_STORE )
 	if ( m_VPKHandle )

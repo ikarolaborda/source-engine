@@ -339,7 +339,7 @@ void ClientPrecache( void )
 
 CON_COMMAND_F( cast_ray, "Tests collision detection", FCVAR_CHEAT )
 {
-	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
 	
 	Vector forward;
 	trace_t tr;
@@ -361,7 +361,7 @@ CON_COMMAND_F( cast_ray, "Tests collision detection", FCVAR_CHEAT )
 
 CON_COMMAND_F( cast_hull, "Tests hull collision detection", FCVAR_CHEAT )
 {
-	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
 	
 	Vector forward;
 	trace_t tr;
@@ -727,7 +727,7 @@ CON_COMMAND_F( explodevector, "Kills a player applying an explosive force. Usage
 //------------------------------------------------------------------------------
 CON_COMMAND_F( buddha, "Toggle.  Player takes damage but won't die. (Shows red cross when health is zero)", FCVAR_CHEAT )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( pPlayer )
 	{
 		if (pPlayer->m_debugOverlays & OVERLAY_BUDDHA_MODE)
@@ -789,7 +789,7 @@ CON_COMMAND( say_team, "Display player message to team" )
 //------------------------------------------------------------------------------
 CON_COMMAND( give, "Give item to player.\n\tArguments: <item_name>" )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( pPlayer 
 		&& (gpGlobals->maxClients == 1 || sv_cheats->GetBool()) 
 		&& args.ArgC() >= 2 )
@@ -833,7 +833,7 @@ CON_COMMAND( give, "Give item to player.\n\tArguments: <item_name>" )
 //------------------------------------------------------------------------------
 CON_COMMAND( fov, "Change players FOV" )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 	if ( pPlayer && sv_cheats->GetBool() )
 	{
 		if ( args.ArgC() > 1 )
@@ -856,7 +856,7 @@ void CC_Player_SetModel( const CCommand &args )
 	if ( gpGlobals->deathmatch )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 	if ( pPlayer && args.ArgC() == 2)
 	{
 		static char szName[256];
@@ -872,7 +872,7 @@ static ConCommand setmodel("setmodel", CC_Player_SetModel, "Changes's player's m
 //-----------------------------------------------------------------------------
 void CC_Player_TestDispatchEffect( const CCommand &args )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 	if ( !pPlayer)
 		return;
 	
@@ -951,7 +951,7 @@ static ConCommand test_dispatcheffect("test_dispatcheffect", CC_Player_TestDispa
 //-----------------------------------------------------------------------------
 void CC_Player_PhysSwap( void )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 	
 	if ( pPlayer )
 	{
@@ -960,7 +960,7 @@ void CC_Player_PhysSwap( void )
 		if ( pWeapon )
 		{
 			// Tell the client to stop selecting weapons
-			engine->ClientCommand( UTIL_GetCommandClient()->edict(), "cancelselect" );
+			engine->ClientCommand( pPlayer->edict(), "cancelselect" );
 
 			const char *strWeaponName = pWeapon->GetName();
 
@@ -984,7 +984,7 @@ static ConCommand physswap("phys_swap", CC_Player_PhysSwap, "Automatically swaps
 //-----------------------------------------------------------------------------
 void CC_Player_BugBaitSwap( void )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 	
 	if ( pPlayer )
 	{
@@ -993,7 +993,7 @@ void CC_Player_BugBaitSwap( void )
 		if ( pWeapon )
 		{
 			// Tell the client to stop selecting weapons
-			engine->ClientCommand( UTIL_GetCommandClient()->edict(), "cancelselect" );
+			engine->ClientCommand( pPlayer->edict(), "cancelselect" );
 
 			const char *strWeaponName = pWeapon->GetName();
 
@@ -1014,7 +1014,7 @@ static ConCommand bugswap("bug_swap", CC_Player_BugBaitSwap, "Automatically swap
 //------------------------------------------------------------------------------
 void CC_Player_Use( const CCommand &args )
 {
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( pPlayer)
 	{
 		pPlayer->SelectItem((char *)args[1]);
@@ -1074,7 +1074,7 @@ void CC_Player_NoClip( void )
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1134,7 +1134,7 @@ void CC_God_f (void)
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1167,7 +1167,7 @@ CON_COMMAND_F( setpos, "Move player to specified origin (must have sv_cheats).",
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1201,7 +1201,7 @@ void CC_setang_f (const CCommand &args)
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1242,7 +1242,7 @@ CON_COMMAND_F( setpos_exact, "Move player to an exact specified origin (must hav
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1276,7 +1276,7 @@ CON_COMMAND_F( setang_exact, "Snap player eyes and orientation to specified pitc
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1310,7 +1310,7 @@ void CC_Notarget_f (void)
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 
@@ -1334,7 +1334,7 @@ void CC_HurtMe_f(const CCommand &args)
 	if ( !sv_cheats->GetBool() )
 		return;
 
-	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() ); 
+	CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() ); 
 	if ( !pPlayer )
 		return;
 

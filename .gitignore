@@ -37,3 +37,16 @@ waf3*/
 .vscode/
 .depproj/
 source-engine.sln
+/target/
+/rust/fuzz/target/
+out-rust-ci/
+out-gate-runs/
+
+# The native C++ oracle build, which is a build output and, under its game
+# directory, Steam content copied in to run it. Neither belongs in the repo.
+out-baseline/
+# Fuzzing corpora, which are generated inputs rather than source.
+/rust/fuzz/corpus/
+/rust/fuzz/artifacts/
+# Agent session state.
+.agent/

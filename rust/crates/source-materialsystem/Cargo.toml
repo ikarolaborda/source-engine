@@ -1,0 +1,19 @@
+[package]
+name = "source-materialsystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+source-filesystem = { path = "../source-filesystem" }
+source-material = { path = "../source-material" }
+source-render = { path = "../source-render" }
+source-vtf = { path = "../source-vtf" }
+
+[dev-dependencies]
+source-bsp = { path = "../source-bsp" }
+source-studio = { path = "../source-studio" }
+
+[lints]
+workspace = true

@@ -2397,7 +2397,7 @@ bool CBugUIPanel::UploadBugSubmission( char const *levelname, int bugId, char co
 	if ( bsp && bsp[ 0 ] )
 	{
 		Q_snprintf( localfile, sizeof( localfile ), "maps/%s.bsp", levelname );
-		char *pszMapPath;
+		char *pszMapPath = NULL;
 		FileHandle_t hBsp = g_pFileSystem->OpenEx( localfile, "rb", 0, 0, &pszMapPath );
 		if ( !hBsp )
 		{
@@ -2405,8 +2405,12 @@ bool CBugUIPanel::UploadBugSubmission( char const *levelname, int bugId, char co
 		}
 		else
 		{
-			V_strncpy( localfile, pszMapPath, sizeof( localfile ) );
-			delete pszMapPath;
+			if ( pszMapPath )
+			{
+				V_strncpy( localfile, pszMapPath, sizeof( localfile ) );
+				// The filesystem hands back a strdup'd name.
+				free( pszMapPath );
+			}
 			g_pFileSystem->Close( hBsp );
 		}
 		Q_snprintf( remotefile, sizeof( remotefile ), "%s/%s.bsp", GetSubmissionURL(bugId), bsp );

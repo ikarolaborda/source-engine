@@ -858,6 +858,13 @@ public:
 
 	Node_t *Push( Node_t *pNode )
 	{
+#if (defined(__arm__) || defined(__aarch64__)) && defined(POSIX)
+		// The legacy Michael-Scott variant below reads a retired dummy node before
+		// validating its sequence. That optimization relies on x86 ordering and is
+		// not memory-safe on ARM even with explicit fences. Keep the reference
+		// runtime correct by serializing this transitional implementation on ARM.
+		AUTO_LOCK( m_ArmQueueMutex );
+#endif
 #ifdef _DEBUG
 		if ( (size_t)pNode % TSLIST_NODE_ALIGNMENT != 0 )
 		{
@@ -894,6 +901,9 @@ public:
 
 	Node_t *Pop()
 	{
+#if (defined(__arm__) || defined(__aarch64__)) && defined(POSIX)
+		AUTO_LOCK( m_ArmQueueMutex );
+#endif
 #define TSQUEUE_BAD_NODE_LINK ( (Node_t *)INT_TO_POINTER( 0xdeadbeef ) )
 		NodeLink_t * volatile		pHead = &m_Head;
 		NodeLink_t * volatile		pTail = &m_Tail;
@@ -1017,6 +1027,9 @@ private:
 	CInterlockedInt m_Count;
 
 	CTSListBase m_FreeNodes;
+#if (defined(__arm__) || defined(__aarch64__)) && defined(POSIX)
+	CThreadFastMutex m_ArmQueueMutex;
+#endif
 } TSLIST_NODE_ALIGN_POST;
 
 #if defined( _WIN32 )

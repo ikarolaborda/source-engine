@@ -127,6 +127,8 @@ void CHudSuitPower::OnThink( void )
 	}
 
 	m_flSuitPower = flCurrentPower;
+	HudValidateReport( "RUST_HUD_SUITPOWER value=%.2f devices=%d flashlight=%d sprint=%d",
+		m_flSuitPower, m_iActiveSuitDevices, (int)flashlightActive, (int)sprintActive );
 }
 
 //-----------------------------------------------------------------------------

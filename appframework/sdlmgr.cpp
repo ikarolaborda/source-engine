@@ -19,6 +19,9 @@
 
 #include "tier1/utllinkedlist.h"
 #include "tier1/convar.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "rust_engine_bridge.h"
+#endif
 #ifdef TOGLES
 #include <EGL/egl.h>
 #endif
@@ -336,6 +339,10 @@ public:
 private:
 	void handleKeyInput( const SDL_Event &event );
 
+#if defined( SOURCE_RUST_ENGINE )
+	CRustEngineBridge m_RustInputBridge;
+#endif
+
 #if defined( DX_TO_GL_ABSTRACTION )
 	SDL_GLContext m_GLContext;
 	GLuint m_readFBO;
@@ -553,6 +560,15 @@ InitReturnVal_t CSDLMgr::Init()
 	m_keyModifiers = 0;
 	m_keyModifierMask = 0;
 	m_mouseButtons = 0;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !m_RustInputBridge.IsInitialized() )
+	{
+		const SourceAbiStatus rustStatus = m_RustInputBridge.Init();
+		if ( rustStatus != SOURCE_ABI_OK )
+			Error( "Rust SDL input initialization failed with status %d\n", rustStatus );
+	}
+	m_RustInputBridge.InputReset();
+#endif
 #if defined( DX_TO_GL_ABSTRACTION )
 	m_GLContext = NULL;
 	m_readFBO = 0;
@@ -726,6 +742,9 @@ void CSDLMgr::Shutdown()
 
 	SDL_GL_UnloadLibrary();
 	SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#if defined( SOURCE_RUST_ENGINE )
+	m_RustInputBridge.Shutdown();
+#endif
 }
 
 bool CSDLMgr::CreateGameWindow( const char *pTitle, bool bWindowed, int width, int height )
@@ -1651,12 +1670,21 @@ void CSDLMgr::handleKeyInput( const SDL_Event &event )
 	const uint32_t ModALTL     = (1 << 6);
 	const uint32_t ModGUIR     = (1 << 7);
 	const uint32_t ModGUIL     = (1 << 8);
+	uint32_t rustModifier = 0;
 
+#if defined( SOURCE_RUST_ENGINE )
+	#define KEYSYMCASE(mod,side,op,key) \
+		case SDLK_##side##mod: \
+			rustModifier = Mod##mod##side; \
+			theEvent.m_VirtualKeyCode = -key; \
+			break
+#else
 	#define KEYSYMCASE(mod,side,op,key) \
 		case SDLK_##side##mod: \
 			m_keyModifiers op Mod##mod##side; \
 			theEvent.m_VirtualKeyCode = -key; \
 			break
+#endif
 
 	//bool bDropKey = false;
 	if (bPressed)
@@ -1694,6 +1722,12 @@ void CSDLMgr::handleKeyInput( const SDL_Event &event )
 
 	#undef KEYSYMCASE
 
+#if defined( SOURCE_RUST_ENGINE )
+	SourceAbiStatus rustStatus = m_RustInputBridge.InputModifier(
+		rustModifier, bPressed, &m_keyModifierMask );
+	if ( rustStatus != SOURCE_ABI_OK )
+		Warning( "Rust SDL modifier update failed with status %d\n", rustStatus );
+#else
 	m_keyModifierMask = 0;
 	if (m_keyModifiers & ModCAPSLOCK)
 		m_keyModifierMask |= (1<<eCapsLockKey);
@@ -1705,6 +1739,7 @@ void CSDLMgr::handleKeyInput( const SDL_Event &event )
 		m_keyModifierMask |= (1<<eAltKey);
 	if (m_keyModifiers & (ModGUIR | ModGUIL))
 		m_keyModifierMask |= (1<<eCommandKey);
+#endif
 
 	theEvent.m_ModifierKeyMask = m_keyModifierMask;
 
@@ -1773,8 +1808,15 @@ void CSDLMgr::PumpWindowsMessageLoop()
 					break;
 				}
 
+#if defined( SOURCE_RUST_ENGINE )
+				SourceAbiStatus rustStatus = m_RustInputBridge.InputMouseMotion(
+					event.motion.xrel, event.motion.yrel );
+				if ( rustStatus != SOURCE_ABI_OK )
+					Warning( "Rust SDL mouse motion failed with status %d\n", rustStatus );
+#else
 				m_nMouseXDelta += event.motion.xrel;
 				m_nMouseYDelta += event.motion.yrel;
+#endif
 
 				if ( !m_bRawInput && !m_bCursorVisible &&
 					(event.motion.x < m_nMouseTargetX - m_nWarpDelta ||
@@ -1838,10 +1880,17 @@ void CSDLMgr::PumpWindowsMessageLoop()
 				const bool bPressed = (event.type == SDL_MOUSEBUTTONDOWN);
 				const CocoaMouseButton_t cocoaButton = ( CocoaMouseButton_t )( 1 << (button - 1 ) );
 
+#if defined( SOURCE_RUST_ENGINE )
+				SourceAbiStatus rustStatus = m_RustInputBridge.InputMouseButton(
+					cocoaButton, bPressed, &m_mouseButtons );
+				if ( rustStatus != SOURCE_ABI_OK )
+					Warning( "Rust SDL mouse button failed with status %d\n", rustStatus );
+#else
 				if (bPressed)
 					m_mouseButtons |= cocoaButton;
 				else
 					m_mouseButtons &= ~cocoaButton;
+#endif
 
 				bool bDoublePress = false;
 
@@ -2073,10 +2122,25 @@ void CSDLMgr::GetMouseDelta( int &x, int &y, bool bIgnoreNextMouseDelta )
 {
 	SDLAPP_FUNC;
 
+#if defined( SOURCE_RUST_ENGINE )
+	int32_t rustX = 0;
+	int32_t rustY = 0;
+	const SourceAbiStatus rustStatus = m_RustInputBridge.InputTakeMouseDelta( &rustX, &rustY );
+	if ( rustStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust SDL mouse delta read failed with status %d\n", rustStatus );
+		x = y = 0;
+	}
+	else
+	{
+		x = rustX;
+		y = rustY;
+	}
+#else
 	x = m_nMouseXDelta;
 	y = m_nMouseYDelta;
-
 	m_nMouseXDelta = m_nMouseYDelta = 0;
+#endif
 }
 
 //  Returns the resolution of the nth display. 0 is the default display.
@@ -2251,4 +2315,3 @@ GLMDisplayDB *CSDLMgr::GetDisplayDB( void )
 #endif // DX_TO_GL_ABSTRACTION
 
 #endif  // !DEDICATED
-

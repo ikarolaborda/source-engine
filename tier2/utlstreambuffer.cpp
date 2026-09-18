@@ -232,8 +232,12 @@ bool CUtlStreamBuffer::StreamPutOverflow( int nSize )
 		GrowAllocatedSize( nSize + 2 );
 	}
 
-	// Don't write the last byte (for NULL termination logic to work)
-	int nBytesToWrite = TellPut() - m_nOffset - 1;
+	// Keep the last byte in memory during ordinary streaming so the buffer can
+	// preserve its automatic NULL terminator. A seek is different: all pending
+	// data must reach the file before the backing buffer is repositioned, or the
+	// retained byte is lost when callers seek back to rewrite an earlier header.
+	const bool bSeeking = nSize < 0;
+	int nBytesToWrite = TellPut() - m_nOffset - ( bSeeking ? 0 : 1 );
 	if ( ( nBytesToWrite > 0 ) || ( nSize < 0 ) )
 	{
 		if ( m_hFileHandle == FILESYSTEM_INVALID_HANDLE )
@@ -253,13 +257,16 @@ bool CUtlStreamBuffer::StreamPutOverflow( int nSize )
 			return false;
 		}
 
-		// This is necessary to deal with auto-NULL terminiation
-		m_Memory[0] = *(unsigned char*)PeekPut( -1 );
-		if ( TellPut() < Size() )
+		if ( !bSeeking )
 		{
-			m_Memory[1] = *(unsigned char*)PeekPut( );
+			// This is necessary to deal with auto-NULL termination.
+			m_Memory[0] = *(unsigned char*)PeekPut( -1 );
+			if ( TellPut() < Size() )
+			{
+				m_Memory[1] = *(unsigned char*)PeekPut( );
+			}
+			m_nOffset = TellPut() - 1;
 		}
-		m_nOffset = TellPut() - 1;
 	}
 
 	if ( nSize < 0 )

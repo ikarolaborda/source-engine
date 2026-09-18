@@ -1,0 +1,115 @@
+[package]
+name = "source-format-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+source-audio = { path = "../crates/source-audio" }
+source-bsp = { path = "../crates/source-bsp" }
+source-compress = { path = "../crates/source-compress" }
+source-console = { path = "../crates/source-console" }
+source-demo = { path = "../crates/source-demo" }
+source-dmx = { path = "../crates/source-dmx" }
+source-keyvalues = { path = "../crates/source-keyvalues" }
+source-net = { path = "../crates/source-net" }
+source-save = { path = "../crates/source-save" }
+source-scene = { path = "../crates/source-scene" }
+source-studio = { path = "../crates/source-studio" }
+source-vpk = { path = "../crates/source-vpk" }
+source-vtf = { path = "../crates/source-vtf" }
+
+[[bin]]
+name = "audio"
+path = "fuzz_targets/audio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bsp"
+path = "fuzz_targets/bsp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "console"
+path = "fuzz_targets/console.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "demo"
+path = "fuzz_targets/demo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dmx"
+path = "fuzz_targets/dmx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "keyvalues"
+path = "fuzz_targets/keyvalues.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network"
+path = "fuzz_targets/network.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scene"
+path = "fuzz_targets/scene.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "save"
+path = "fuzz_targets/save.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "studio"
+path = "fuzz_targets/studio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vpk"
+path = "fuzz_targets/vpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vtf"
+path = "fuzz_targets/vtf.rs"
+test = false
+doc = false
+bench = false

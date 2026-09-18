@@ -73,6 +73,9 @@
 #include "host_state.h"
 #include "voice.h"
 #include "cbenchmark.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -779,6 +782,114 @@ int SV_BuildSendTablesArray( ServerClass *pClasses, SendTable **pTables, int nMa
         return nTables;
 }
 
+#if defined( SOURCE_RUST_ENGINE )
+static SourceAbiSlice SV_RustDataTableSlice( const char *value )
+{
+	SourceAbiSlice slice;
+	slice.data = reinterpret_cast<const uint8_t *>( value );
+	slice.length = value ? Q_strlen( value ) : 0;
+	return slice;
+}
+
+static bool SV_RegisterRustSendTable_R( SendTable *pTable )
+{
+	if ( !pTable || !pTable->GetName() )
+		return false;
+
+	SourceAbiDataTableRegistration registration;
+	const SourceAbiStatus tableStatus = source_rust_bridge_data_table_register(
+		pTable->GetName(), Q_strlen( pTable->GetName() ),
+		static_cast<uint32_t>( pTable->GetNumProps() ), &registration );
+	if ( tableStatus != SOURCE_ABI_OK )
+		return false;
+	if ( registration.created == 0 )
+		return true;
+
+	for ( int i = 0; i < pTable->GetNumProps(); ++i )
+	{
+		SendProp *pProp = pTable->GetProp( i );
+		if ( !pProp || !pProp->GetName() )
+			return false;
+
+		SourceAbiDataTableProperty property;
+		Q_memset( &property, 0, sizeof( property ) );
+		property.name = SV_RustDataTableSlice( pProp->GetName() );
+		property.property_type = static_cast<uint32_t>( pProp->GetType() );
+		property.flags = static_cast<uint32_t>( pProp->GetFlags() );
+		property.bit_count = pProp->m_nBits;
+		property.elements = static_cast<uint32_t>( pProp->GetNumElements() );
+		property.low_value = pProp->m_fLowValue;
+		property.high_value = pProp->m_fHighValue;
+
+		SendTable *pChildTable = NULL;
+		if ( pProp->GetType() == DPT_DataTable )
+		{
+			pChildTable = pProp->GetDataTable();
+			if ( !pChildTable || !pChildTable->GetName() )
+				return false;
+			property.reference_name = SV_RustDataTableSlice( pChildTable->GetName() );
+		}
+		else if ( pProp->IsExcludeProp() )
+		{
+			if ( !pProp->GetExcludeDTName() )
+				return false;
+			property.reference_name = SV_RustDataTableSlice( pProp->GetExcludeDTName() );
+		}
+
+		if ( source_rust_bridge_data_table_register_property( registration.table_id,
+			&property ) != SOURCE_ABI_OK )
+		{
+			return false;
+		}
+		if ( pChildTable && !SV_RegisterRustSendTable_R( pChildTable ) )
+			return false;
+	}
+	return true;
+}
+
+static bool SV_RegisterRustDataTables( ServerClass *pClasses )
+{
+	if ( source_rust_bridge_data_table_clear() != SOURCE_ABI_OK )
+		return false;
+
+	for ( ServerClass *pClass = pClasses; pClass; pClass = pClass->m_pNext )
+	{
+		if ( !SV_RegisterRustSendTable_R( pClass->m_pTable ) )
+			return false;
+	}
+
+	uint32_t expectedClassId = 0;
+	for ( ServerClass *pClass = pClasses; pClass; pClass = pClass->m_pNext )
+	{
+		SourceAbiDataTableRegistration table;
+		if ( source_rust_bridge_data_table_register( pClass->m_pTable->GetName(),
+			Q_strlen( pClass->m_pTable->GetName() ),
+			static_cast<uint32_t>( pClass->m_pTable->GetNumProps() ), &table ) != SOURCE_ABI_OK )
+		{
+			return false;
+		}
+		uint32_t classId = UINT32_MAX;
+		if ( source_rust_bridge_server_class_register( pClass->GetName(),
+			Q_strlen( pClass->GetName() ), table.table_id, &classId ) != SOURCE_ABI_OK ||
+			classId != expectedClassId++ )
+		{
+			return false;
+		}
+	}
+
+	SourceAbiDataTableSummary summary;
+	if ( source_rust_bridge_data_table_finalize( SendTable_GetCRC(), &summary ) != SOURCE_ABI_OK ||
+		summary.class_count != expectedClassId )
+	{
+		return false;
+	}
+	ConMsg( "Rust datatable schema active: %u classes, %u tables, %u properties, CRC %08x\n",
+		summary.class_count, summary.table_count, summary.property_count,
+		summary.compatibility_crc );
+	return true;
+}
+#endif
+
 
 // Builds an alternate copy of the datatable for any classes that have datatables with props excluded.
 void SV_InitSendTables( ServerClass *pClasses )
@@ -786,12 +897,24 @@ void SV_InitSendTables( ServerClass *pClasses )
 	SendTable *pTables[MAX_DATATABLES];
 	int nTables = SV_BuildSendTablesArray( pClasses, pTables, ARRAYSIZE( pTables ) );
 
-	SendTable_Init( pTables, nTables );
+	if ( !SendTable_Init( pTables, nTables ) )
+		return;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !SV_RegisterRustDataTables( pClasses ) )
+	{
+		Warning( "Rust datatable schema validation failed; using native class metadata\n" );
+		source_rust_bridge_data_table_clear();
+	}
+#endif
 }
 
 
 void SV_TermSendTables( ServerClass *pClasses )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	source_rust_bridge_snapshot_clear();
+	source_rust_bridge_data_table_clear();
+#endif
 	SendTable_Term();
 }
 
@@ -2600,6 +2723,26 @@ bool CGameServer::SpawnServer( const char *szMapName, const char *szMapFile, con
 		return false;
 	}
 
+#if defined( SOURCE_RUST_ENGINE )
+	SourceAbiWorldInfo rustWorldInfo = {};
+	const SourceAbiStatus rustWorldStatus = source_rust_bridge_world_load(
+		szMapFile, Q_strlen( szMapFile ), &rustWorldInfo );
+	if ( rustWorldStatus != SOURCE_ABI_OK )
+	{
+		Warning( "Rust BSP world synchronization failed for %s (status %d)\n",
+			szMapFile, rustWorldStatus );
+		source_rust_bridge_world_clear();
+		m_State = ss_dead;
+		g_pFileSystem->EndMapAccess();
+		return false;
+	}
+	ConMsg( "Rust BSP world synchronized: %llu planes, %llu nodes, %llu leaves, %llu clusters (%s)\n",
+		static_cast<unsigned long long>( rustWorldInfo.plane_count ),
+		static_cast<unsigned long long>( rustWorldInfo.node_count ),
+		static_cast<unsigned long long>( rustWorldInfo.leaf_count ),
+		static_cast<unsigned long long>( rustWorldInfo.cluster_count ), szMapFile );
+#endif
+
 	COM_TimestampedLog( "modelloader->GetModelForName(%s) -- Finished", szMapFile );
 
 	if ( IsMultiplayer() && !IsX360() )
@@ -2977,4 +3120,3 @@ void SV_Frame( bool finalTick )
 		Steam3Server().RunFrame();
 	}
 }
-

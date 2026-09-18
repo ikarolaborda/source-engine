@@ -1,0 +1,14 @@
+schema = 1
+captured_utc = "2026-09-17"
+source_engine = "38549ac392d97deab79bb1c388f0126c64cee4fe"
+
+[submodules]
+ivp = "c3bf6e46b9e8e580b09c4da3091f67075fdb4de0"
+lib = "86a66ee92d9fda0a09f54a435e850faa7ab5d0fa"
+thirdparty = "c5b901ecef515ea068fa8b8a19ca5cd5353905cb"
+
+[compatibility]
+steam_app_id = 220
+steam_branch = "steam_legacy"
+steam_build_id = "12694556"
+

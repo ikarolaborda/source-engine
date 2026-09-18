@@ -1,0 +1,19 @@
+// Exercise the opening G-Man scene with audio and scene diagnostics enabled.
+developer 2
+scene_print 1
+r_flex 1
+scene_clientflex 1
+sv_cheats 1
+cl_lipsync_validate 1
+// Reports the voice channel's position in the sentence beside the mouth
+// samples, so a face held on one shape can be told apart from a mixer that
+// never advanced past the first phoneme.
+snd_validate 1
+echo RUST_INTRO_LIPSYNC_STARTED
+// The opening scene does not begin at a fixed offset from map load, and the
+// sentence itself runs about seven seconds. A short wait sometimes ended
+// before G-Man spoke at all, which passed the scene-start check only by
+// luck, so the window covers the whole intro.
+Test_Wait 60
+echo RUST_INTRO_LIPSYNC_COMPLETED
+quit

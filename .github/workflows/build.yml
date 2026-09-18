@@ -109,3 +109,20 @@ jobs:
     - name: Build dedicated macos-amd64
       run: |
         scripts/build-macos-amd64.sh -d
+
+  build-macos-arm64-rust:
+    runs-on: macos-14
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.85.1
+    - name: Build macos-arm64 rust-engine
+      run: |
+        scripts/build-macos-arm64-rust.sh
+    # The renderer's Metal path only exists on macOS, so this is the one job
+    # that can exercise it against a real GPU.  Its tests open a device and
+    # compare captured pixels, which is the gate the visual comparisons build
+    # on, and they refuse to pass by skipping on Apple silicon.
+    - name: Test the Metal renderer against a device
+      run: |
+        cargo test -p source-render

@@ -1,0 +1,16 @@
+[package]
+name = "source-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+# Only the integration test reads a map: the renderer itself knows nothing
+# about content formats, and nothing in the shipped library depends on this.
+[dev-dependencies]
+source-bsp = { path = "../source-bsp" }
+
+[lints]
+workspace = true

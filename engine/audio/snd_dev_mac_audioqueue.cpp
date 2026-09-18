@@ -330,6 +330,14 @@ void CAudioDeviceAudioQueue::PaintEnd( void )
 		// We are running the audio queue but have become starved of buffers.
 		// Stop the audio queue so we force a restart of it.
 		AudioQueueStop( m_Queue, true );
+
+		// The restart below is gated on this flag, so the stop above only
+		// forces a restart if the flag is cleared here.  Left set, the device
+		// stays stopped until the running-property listener happens to report
+		// it, which is asynchronous and several frames away.  The buffers are
+		// refilled immediately below, so clearing it keeps the outage to the
+		// hitch that caused it.
+		m_bRunning = false;
 	}
 
 	//

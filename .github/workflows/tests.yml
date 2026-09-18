@@ -3,6 +3,50 @@ name: Tests
 on: [push, pull_request]
 
 jobs:
+  rust-foundations:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # The revision gate compares the frozen submodule trees that the
+        # compatibility corpus was measured against.
+        submodules: recursive
+        fetch-depth: 0
+    - uses: dtolnay/rust-toolchain@1.85.1
+      with:
+        components: clippy,rustfmt
+        targets: x86_64-pc-windows-msvc
+    - name: Check Rust workspace and C ABI
+      run: |
+        python3 scripts/verify_rust_port_revisions.py
+        cargo fmt --all -- --check
+        cargo fmt --manifest-path rust/fuzz/Cargo.toml -- --check
+        cargo clippy --workspace --all-targets -- -D warnings
+        cargo test --workspace
+        cargo metadata --manifest-path rust/fuzz/Cargo.toml --no-deps
+        ./rust/verify_abi.sh
+    # This job is the Linux half of the platform expansion: running the
+    # workspace here is what keeps the crates' non-macOS paths honest, since
+    # the renderer's Metal backend compiles out entirely.  Windows has no
+    # runner for the Rust crates yet, so it is held to a cross-check.
+    - name: Cross-check the workspace for Windows
+      run: |
+        cargo clippy --workspace --target x86_64-pc-windows-msvc -- -D warnings
+    # Reading the fuzz manifest is not the same as compiling what it declares,
+    # and a target that no longer builds is a format that is no longer being
+    # fuzzed.  Each target then gets a short run, which is enough to catch a
+    # newly reachable panic without holding the pipeline open.
+    - name: Build and exercise the fuzz targets
+      run: |
+        rustup toolchain install nightly --profile minimal
+        cargo +nightly install cargo-fuzz --locked
+        cargo +nightly fuzz build --fuzz-dir rust/fuzz
+        for target in $(cargo +nightly fuzz list --fuzz-dir rust/fuzz); do
+          cargo +nightly fuzz run --fuzz-dir rust/fuzz "$target" -- \
+            -max_total_time=60 -max_len=16384
+        done
+
   tests-linux-i386:
     runs-on: ubuntu-20.04
 

@@ -31,6 +31,9 @@
 #include "gl_cvars.h"
 #include "filesystem_engine.h"
 #include "tier0/cpumonitoring.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 #ifndef SWDS
 #include "vgui_baseui_interface.h"
 #endif
@@ -303,7 +306,9 @@ void CEngine::Frame( void )
 	if ( m_flPreviousTime == 0 )
 	{
 		(void) FilterTime( 0.0f );
+#if !defined( SOURCE_RUST_ENGINE )
 		m_flPreviousTime = Sys_FloatTime() - m_flMinFrameTime;
+#endif
 	}
 
 	// Watch for data from the CPU frequency monitoring system and print it to the console.
@@ -325,6 +330,38 @@ void CEngine::Frame( void )
 
 		// Determine dt since we last ticked
 		m_flFrameTime = m_flCurrentTime - m_flPreviousTime;
+		double flWaitTime = m_flMinFrameTime - m_flFrameTime;
+
+#if defined( SOURCE_RUST_ENGINE )
+		// Keep the legacy FPS/cvar policy, but let the Rust host own elapsed-time
+		// accounting and the ready-versus-wait decision.
+		(void) FilterTime( m_flFrameTime < 0.0 ? 0.0f : (float)m_flFrameTime );
+		const uint64_t nowNs = (uint64_t)( m_flCurrentTime * 1000000000.0 );
+		const uint64_t minimumFrameNs = m_flMinFrameTime > 0.0f
+			? (uint64_t)( m_flMinFrameTime * 1000000000.0 + 0.5 )
+			: 0;
+		SourceAbiFramePace pace = {};
+		const SourceAbiStatus paceStatus = source_rust_bridge_host_pace(
+			nowNs, minimumFrameNs, &pace );
+		if ( paceStatus != SOURCE_ABI_OK )
+		{
+			Sys_Error( "Rust host frame pacing failed: %d", paceStatus );
+			return;
+		}
+		m_flFrameTime = (double)pace.elapsed_ns / 1000000000.0;
+		flWaitTime = (double)pace.wait_ns / 1000000000.0;
+		if ( pace.ready )
+		{
+			static bool s_bReportedRustFramePacing = false;
+			if ( !s_bReportedRustFramePacing )
+			{
+				Msg( "Rust host frame pacing active: %llu ns minimum\n",
+					(unsigned long long)minimumFrameNs );
+				s_bReportedRustFramePacing = true;
+			}
+			break;
+		}
+#else
 
 		// This should never happen...
 		Assert( m_flFrameTime >= 0.0f );
@@ -341,6 +378,8 @@ void CEngine::Frame( void )
 			// Time to render our frame.
 			break;
 		}
+		flWaitTime = m_flMinFrameTime - m_flFrameTime;
+#endif
 
 		if ( IsPC() && ( !sv.IsDedicated() || host_timer_spin_ms.GetFloat() != 0 ) )
 		{
@@ -356,7 +395,7 @@ void CEngine::Frame( void )
 			// If we are meeting our frame rate then go idle for a while
 			// to avoid wasting power and to let other threads/processes run.
 			// Calculate how long we need to wait.
-			int nSleepMS = (int)( ( m_flMinFrameTime - m_flFrameTime ) * 1000 - fBusyWaitMS );
+			int nSleepMS = (int)( flWaitTime * 1000 - fBusyWaitMS );
 			if ( nSleepMS > 0 )
 				ThreadSleep( nSleepMS );
 
@@ -364,7 +403,7 @@ void CEngine::Frame( void )
 		}
 		else
 		{
-			int nSleepMicrosecs = (int) ceilf( clamp( ( m_flMinFrameTime - m_flFrameTime ) * 1000000.f, 1.f, 1000000.f ) );
+			int nSleepMicrosecs = (int) ceilf( clamp( (float)( flWaitTime * 1000000.0 ), 1.f, 1000000.f ) );
 #ifdef POSIX
 			usleep( nSleepMicrosecs );
 #else

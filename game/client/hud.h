@@ -203,4 +203,12 @@ void LoadHudTextures( CUtlDict< CHudTexture *, int >& list, const char *szFilena
 
 void GetHudSize( int& w, int &h );
 
+//-----------------------------------------------------------------------------
+// HUD validation diagnostics, gated behind cl_hud_validate. Elements report
+// the value they are about to render whenever it changes, so scripted runs can
+// assert that the HUD really tracks game state instead of only that it loaded.
+//-----------------------------------------------------------------------------
+bool HudValidateEnabled();
+void HudValidateReport( PRINTF_FORMAT_STRING const char *pFormat, ... ) FMTFUNCTION( 1, 2 );
+
 #endif // HUD_H

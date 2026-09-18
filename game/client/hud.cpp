@@ -170,6 +170,28 @@ typedef struct hudelement_hidden_s
 
 ConVar hidehud( "hidehud", "0", FCVAR_CHEAT );
 
+static ConVar cl_hud_validate( "cl_hud_validate", "0", FCVAR_CHEAT,
+	"Report each change of a rendered HUD value so scripted runs can assert the HUD tracks game state." );
+
+bool HudValidateEnabled()
+{
+	return cl_hud_validate.GetBool();
+}
+
+void HudValidateReport( const char *pFormat, ... )
+{
+	if ( !cl_hud_validate.GetBool() )
+		return;
+
+	char message[512];
+	va_list argptr;
+	va_start( argptr, pFormat );
+	Q_vsnprintf( message, sizeof( message ), pFormat, argptr );
+	va_end( argptr );
+
+	Msg( "%s\n", message );
+}
+
 
 
 CHudTexture::CHudTexture()

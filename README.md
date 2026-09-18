@@ -10,7 +10,13 @@ It debuted as the successor to GoldSrc with Half-Life: Source in June 2004,
 followed by Counter-Strike: Source and Half-Life 2 later that year.
 Source does not have a concise version numbering scheme; instead, it was released in incremental versions
 
-Source code is based on TF2 2018 leak. Don't use it for commercial purposes.
+> **Provenance warning:** this repository identifies parts of its history as
+> derived from the 2018 TF2 leak. The included Source 1 SDK license does not,
+> by itself, establish redistribution rights for material outside the
+> authorized SDK. Do not publicly distribute this tree or binaries made from
+> unaudited portions. The Rust port treats replacement from authorized SDK
+> sources or clean implementations as a release gate; see
+> [docs/rust-port/provenance.md](docs/rust-port/provenance.md).
 
 This project is using waf buildsystem. If you have waf-related questions look https://waf.io/book
 

@@ -101,7 +101,13 @@ uint64 GetCPUFreqFromPROC()
 
 uint64 CalculateCPUFreq()
 {
-#if defined(__APPLE__) || defined(PLATFORM_BSD)
+#if (defined(__arm__) || defined(__aarch64__)) && defined(POSIX)
+	// Plat_Rdtsc() uses clock_gettime nanoseconds on POSIX ARM rather than a
+	// CPU cycle register, so its conversion frequency is exactly 1 GHz. Using
+	// the physical CPU frequency here makes every CFastTimer result incorrect
+	// and sysctl hw.cpufrequency_max is unavailable on Apple Silicon.
+	return (uint64)1000000000;
+#elif defined(__APPLE__) || defined(PLATFORM_BSD)
 	return GetCPUFreqFromPROC();
 #else
 	// Try to open cpuinfo_max_freq. If the kernel was built with cpu scaling support disabled, this will fail.
@@ -176,9 +182,7 @@ uint64 CalculateCPUFreq()
 
 	return period;
 #else
-	// ARM hard-coded frequency
-	return (uint64)2000000000;
+	return (uint64)1000000000;
 #endif // if !ARM
 #endif // if APPLE
 }
-

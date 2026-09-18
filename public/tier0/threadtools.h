@@ -306,6 +306,11 @@ PLATFORM_INTERFACE void ThreadSetAffinity( ThreadHandle_t hThread, int nAffinity
 
 #if defined( _X360 ) || defined( _PS3 )
 #define ThreadMemoryBarrier() __lwsync()
+#elif (defined(__arm__) || defined(__aarch64__)) && defined(POSIX)
+// A compiler barrier is not a hardware barrier on weakly ordered ARM CPUs.
+// The lock-free lists and queues use this between independently loaded pointer
+// and sequence fields, so publish/observe ordering must be enforced in silicon.
+#define ThreadMemoryBarrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #elif defined(COMPILER_MSVC)
 // Prevent compiler reordering across this barrier. This is
 // sufficient for most purposes on x86/x64.

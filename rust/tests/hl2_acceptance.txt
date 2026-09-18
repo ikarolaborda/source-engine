@@ -1,0 +1,35 @@
+// Frame-synchronized debug-engine scenario used by run_rust_hl2_smoke.sh.
+// Single player normally hands entity state to the client in process and skips
+// the packet-entity writer entirely. Turning the shortcut off makes the listen
+// server encode real delta packets, which is what exercises the Rust entity
+// delta classification.
+cl_localnetworkbackdoor 0
+// The save path reports which implementation composed the container only under
+// save spew, and the gate requires that report.
+save_spew 1
+Test_Wait 5
+echo RUST_ACCEPTANCE_MOVEMENT_BEFORE
+getpos 2
++forward
+Test_Wait 2
+-forward
+echo RUST_ACCEPTANCE_MOVEMENT_AFTER
+getpos 2
+echo RUST_ACCEPTANCE_SIMULATION_REPORT
+report_simthinklist
+physics_report_active
+record rust_port_acceptance
+Test_Wait 4
+save rust_port_acceptance wait
+Test_Wait 2
+stop
+Test_Wait 2
+load rust_port_acceptance
+Test_Wait 5
+changelevel d1_trainstation_02
+// Cold content/shader caches can keep the legacy changelevel active for more
+// than eight seconds. Do not start demo playback while edicts are rebuilding.
+Test_Wait 20
+playdemo rust_port_acceptance
+Test_Wait 12
+quit

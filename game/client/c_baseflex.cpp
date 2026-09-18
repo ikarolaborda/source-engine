@@ -31,6 +31,32 @@ ConVar g_CV_PhonemeFilter("phonemefilter", "0.08", 0, "Time duration of box filt
 ConVar g_CV_FlexRules("flex_rules", "1", 0, "Allow flex animation rules to run." );
 ConVar g_CV_BlinkDuration("blink_duration", "0.2", 0, "How many seconds an eye blink will last." );
 ConVar g_CV_FlexSmooth("flex_smooth", "1", 0, "Applies smoothing/decay curve to flex animation controller changes." );
+ConVar cl_lipsync_validate("cl_lipsync_validate", "0", FCVAR_CHEAT,
+	"Emit one-shot validation markers while G-Man phonemes are converted into rendered flex weights." );
+
+static bool s_bReportedGManPhonemes = false;
+static bool s_bReportedGManViseme = false;
+static bool s_bReportedGManFlex = false;
+static bool s_bReportedGManRange = false;
+static bool s_bGManClockStarted = false;
+static C_BaseFlex *s_pGManVisemeFlex = NULL;
+
+// Sampled rather than reported once, because a single nonzero weight only
+// shows the visemes started.  A mouth frozen on its first frame produces that
+// same marker, so the magnitude is sampled across the sentence and the gate
+// checks that it actually varies.
+static float s_flGManVisemeMagnitude = 0.0f;
+static float s_flGManLastSampleTime = -1.0f;
+static bool s_bGManSamplePending = false;
+
+static bool IsGManLipSyncValidationTarget( C_BaseFlex *pFlex )
+{
+	if ( !cl_lipsync_validate.GetBool() || !pFlex || !pFlex->GetModel() )
+		return false;
+
+	const char *pModelName = modelinfo->GetModelName( pFlex->GetModel() );
+	return pModelName && V_stristr( pModelName, "gman" );
+}
 
 #if defined( CBaseFlex )
 #undef CBaseFlex
@@ -760,7 +786,21 @@ void C_BaseFlex::AddViseme( Emphasized_Phoneme *classes, float emphasis_intensit
 				// Translate to global controller number
 				int j = FlexControllerLocalToGlobal( actual_flexsetting_header, pWeights->key );
 				// Add scaled weighting in
-				g_flexweight[j] += info->amount * scale * pWeights->weight;
+				float flContribution = info->amount * scale * pWeights->weight;
+				g_flexweight[j] += flContribution;
+				if ( !s_bReportedGManViseme && flContribution != 0.0f &&
+					IsGManLipSyncValidationTarget( this ) )
+				{
+					Msg( "RUST_LIPSYNC_VISEME_ACTIVE model=%s phoneme=%d controller=%s weight=%.4f\n",
+						modelinfo->GetModelName( GetModel() ), phoneme,
+						GetGlobalFlexControllerName( j ), flContribution );
+					s_bReportedGManViseme = true;
+				}
+				if ( flContribution != 0.0f && IsGManLipSyncValidationTarget( this ) )
+				{
+					s_pGManVisemeFlex = this;
+					s_flGManVisemeMagnitude += fabsf( flContribution );
+				}
 				// Go to next setting
 				pWeights++;
 			}
@@ -926,6 +966,15 @@ void C_BaseFlex::ProcessVisemes( Emphasized_Phoneme *classes )
 	if ( !MouthInfo().IsActive() )
 		return;
 
+	// Reset before the tracks run so the magnitude below covers only the
+	// visemes this frame produced.
+	bool bValidating = IsGManLipSyncValidationTarget( this );
+	float flValidationElapsed = -1.0f;
+	if ( bValidating )
+	{
+		s_flGManVisemeMagnitude = 0.0f;
+	}
+
 	// Multiple phoneme tracks can overlap, look across all such tracks.
 	for ( int source = 0 ; source < MouthInfo().GetNumVoiceSources(); source++ )
 	{
@@ -939,6 +988,18 @@ void C_BaseFlex::ProcessVisemes( Emphasized_Phoneme *classes )
 
 		float	sentence_length = engine->GetSentenceLength( vd->GetSource() );
 		float	timesincestart = vd->GetElapsedTime();
+		if ( !s_bReportedGManPhonemes && sentence->GetRuntimePhonemeCount() > 0 &&
+			IsGManLipSyncValidationTarget( this ) )
+		{
+			Msg( "RUST_LIPSYNC_PHONEMES_READY model=%s count=%d elapsed=%.4f length=%.4f\n",
+				modelinfo->GetModelName( GetModel() ), sentence->GetRuntimePhonemeCount(),
+				timesincestart, sentence_length );
+			s_bReportedGManPhonemes = true;
+		}
+		if ( bValidating && flValidationElapsed < 0.0f )
+		{
+			flValidationElapsed = timesincestart;
+		}
 
 		// This sound should be done...why hasn't it been removed yet???
 		if ( timesincestart >= ( sentence_length + 2.0f ) )
@@ -970,6 +1031,35 @@ void C_BaseFlex::ProcessVisemes( Emphasized_Phoneme *classes )
 
 		// Blend and add visemes together
 		AddVisemesForSentence( classes, emphasis_intensity, sentence, t, dt, juststarted );
+	}
+
+	// The sentence clock is the mixer's position in the voice channel.  It is
+	// reported when it first leaves zero, but nothing here waits for it: it
+	// has been observed reading zero for a whole sentence while the face
+	// posed and moved, so sampling only once it moved measured the mixer's
+	// bookkeeping and reported a still face whatever the face did.
+	if ( bValidating && !s_bGManClockStarted && flValidationElapsed > 0.0f )
+	{
+		s_bGManClockStarted = true;
+		Msg( "RUST_LIPSYNC_CLOCK_STARTED elapsed=%.4f\n", flValidationElapsed );
+	}
+
+	// Sampled on the client's own clock, which advances whenever a frame is
+	// drawn and so keeps this measuring the mouth.  The mixer's position
+	// goes out beside each sample rather than gating it, so a stalled mixer
+	// stays visible without deciding whether the mouth animated.
+	//
+	// Throttled so a long sentence leaves a readable trace rather than one
+	// line per frame, while still sampling often enough to show the shape of
+	// the mouth changing.
+	if ( bValidating &&
+		( s_flGManLastSampleTime < 0.0f ||
+		  fabsf( gpGlobals->curtime - s_flGManLastSampleTime ) >= 0.25f ) )
+	{
+		s_flGManLastSampleTime = gpGlobals->curtime;
+		s_bGManSamplePending = true;
+		Msg( "RUST_LIPSYNC_VISEME_SAMPLE at=%.3f elapsed=%.3f magnitude=%.4f\n",
+			s_flGManLastSampleTime, flValidationElapsed, s_flGManVisemeMagnitude );
 	}
 }
 
@@ -1301,6 +1391,68 @@ void C_BaseFlex::SetupLocalWeights( const matrix3x4_t *pBoneToWorld, int nFlexWe
 
 	// convert the flex controllers into actual flex values
 	RunFlexRules( hdr, pFlexWeights );
+
+	if ( s_pGManVisemeFlex == this )
+	{
+		float flLargestWeight = 0.0f;
+		int nLargestWeight = -1;
+		float flTotalWeight = 0.0f;
+		for ( int i = 0; i < nFlexWeightCount; ++i )
+		{
+			flTotalWeight += fabsf( pFlexWeights[i] );
+			if ( fabsf( pFlexWeights[i] ) > fabsf( flLargestWeight ) )
+			{
+				flLargestWeight = pFlexWeights[i];
+				nLargestWeight = i;
+			}
+		}
+		if ( nLargestWeight >= 0 && flLargestWeight != 0.0f && !s_bReportedGManFlex )
+		{
+			Msg( "RUST_LIPSYNC_RENDER_FLEX_ACTIVE model=%s flex=%s weight=%.4f\n",
+				modelinfo->GetModelName( GetModel() ),
+				hdr->pFlexdesc( nLargestWeight )->pszFACS(), flLargestWeight );
+			s_bReportedGManFlex = true;
+		}
+		// Paired with the viseme sample so the two sides of the conversion can
+		// be read against each other: visemes that move while the rendered
+		// weights hold still is exactly the shape of a mouth that does not
+		// animate.
+		if ( s_bGManSamplePending )
+		{
+			Msg( "RUST_LIPSYNC_RENDER_SAMPLE at=%.3f total=%.4f largest=%s weight=%.4f\n",
+				s_flGManLastSampleTime, flTotalWeight,
+				nLargestWeight >= 0 ? hdr->pFlexdesc( nLargestWeight )->pszFACS() : "none",
+				flLargestWeight );
+			s_bGManSamplePending = false;
+		}
+
+		// RampFlexWeight discards any weight that reaches the flex's authored
+		// target3, so a weight far above one is not a loud flex, it is a
+		// silent one.  Reporting the controller inputs beside the rule
+		// outputs separates the two candidate causes: inputs already past
+		// their own min/max mean the visemes are accumulating wrongly, while
+		// in-range inputs feeding an out-of-range output mean the rules are
+		// being evaluated against the wrong units.
+		if ( !s_bReportedGManRange && flLargestWeight > 2.0f )
+		{
+			s_bReportedGManRange = true;
+			Msg( "RUST_LIPSYNC_RANGE_OUTPUT flex=%s weight=%.4f\n",
+				hdr->pFlexdesc( nLargestWeight )->pszFACS(), flLargestWeight );
+			for ( LocalFlexController_t i = LocalFlexController_t(0);
+				i < hdr->numflexcontrollers(); ++i )
+			{
+				mstudioflexcontroller_t *pflex = hdr->pFlexcontroller( i );
+				float flInput = g_flexweight[pflex->localToGlobal];
+				if ( flInput < pflex->min || flInput > pflex->max )
+				{
+					Msg( "RUST_LIPSYNC_RANGE_INPUT controller=%s value=%.4f min=%.4f max=%.4f OUTSIDE\n",
+						pflex->pszName(), flInput, pflex->min, pflex->max );
+				}
+			}
+			Msg( "RUST_LIPSYNC_RANGE_DONE\n" );
+		}
+		s_pGManVisemeFlex = NULL;
+	}
 
 	// aim the eyes
 	SetViewTarget( hdr );
@@ -2095,4 +2247,3 @@ BEGIN_BYTESWAP_DATADESC( flexweight_t )
 	DEFINE_FIELD( weight, FIELD_FLOAT ),
 	DEFINE_FIELD( influence, FIELD_FLOAT ),
 END_BYTESWAP_DATADESC()
-

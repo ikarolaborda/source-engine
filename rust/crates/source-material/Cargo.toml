@@ -1,0 +1,17 @@
+[package]
+name = "source-material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+source-keyvalues = { path = "../source-keyvalues" }
+
+# Only the shipped-content test reads archives; the crate itself takes
+# material text and leaves resolution to its caller.
+[dev-dependencies]
+source-vpk = { path = "../source-vpk" }
+
+[lints]
+workspace = true

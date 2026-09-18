@@ -15,6 +15,10 @@
 #include "fmtstr.h"
 #include "master.h"
 
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -141,6 +145,14 @@ typedef struct
 	int		nSplitSize : 16;
 } SPLITPACKET;
 #pragma pack()
+
+#if defined( SOURCE_RUST_ENGINE )
+// Rust places pieces at offsets it computes from the same header and caps a
+// rebuilt message at the same size, so a change on either side that the other
+// did not follow has to fail here rather than on the wire.
+COMPILE_TIME_ASSERT( sizeof( SPLITPACKET ) == SOURCE_ABI_SPLIT_PACKET_HEADER_BYTES );
+COMPILE_TIME_ASSERT( NET_MAX_MESSAGE == SOURCE_ABI_MAX_REASSEMBLED_BYTES );
+#endif
 
 #define MIN_USER_MAXROUTABLE_SIZE	576  // ( X.25 Networks )
 #define MAX_USER_MAXROUTABLE_SIZE	MAX_ROUTABLE_PAYLOAD
@@ -1121,6 +1133,9 @@ public:
 
 		memset( &netsplit, 0, sizeof( netsplit ) );
 		lastactivetime = 0.0f;
+#if defined( SOURCE_RUST_ENGINE )
+		rustPeerId = 0;
+#endif
 	}
 
 public:
@@ -1129,6 +1144,11 @@ public:
 	LONGPACKET		netsplit;
 	// host_time the last time any entry was received for this entry
 	float			lastactivetime;
+#if defined( SOURCE_RUST_ENGINE )
+	// The Rust reassembler holding this peer's partial message, created on
+	// the first piece that arrives from it.
+	uint64_t		rustPeerId;
+#endif
 };
 
 typedef CUtlVector< CSplitPacketEntry > vecSplitPacketEntries_t;
@@ -1149,6 +1169,13 @@ void NET_DiscardStaleSplitpackets( const int sock )
 		if ( net_time < ( entry->lastactivetime + SPLIT_PACKET_STALE_TIME ) )
 			continue;
 
+#if defined( SOURCE_RUST_ENGINE )
+		if ( entry->rustPeerId != 0 )
+		{
+			source_rust_bridge_split_packet_remove( entry->rustPeerId );
+			entry->rustPeerId = 0;
+		}
+#endif
 		splitPacketEntries.Remove( i );
 	}
 
@@ -1281,6 +1308,44 @@ bool NET_GetLong( const int sock, netpacket_t *packet )
 
 	entry->lastactivetime = net_time;
 	Assert( packet->from.CompareAdr( entry->from ) );
+
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust owns reassembly: it places each piece by the offset its own header
+	// declares and only reports a message once every piece has landed. The
+	// native path below stays reachable for a peer the Rust side would not
+	// take, so a refusal here is a dropped datagram rather than a fallback.
+	if ( entry->rustPeerId == 0 )
+	{
+		uint64_t rustPeerId = 0;
+		if ( source_rust_bridge_split_packet_create( &rustPeerId ) == SOURCE_ABI_OK )
+			entry->rustPeerId = rustPeerId;
+	}
+	if ( entry->rustPeerId != 0 )
+	{
+		uint64_t nRebuiltLength = 0;
+		bool bRebuilt = false;
+		const SourceAbiStatus status = source_rust_bridge_split_packet_accept(
+			entry->rustPeerId, packet->data, static_cast<uint64_t>( packet->size ),
+			entry->netsplit.buffer, static_cast<uint64_t>( sizeof( entry->netsplit.buffer ) ),
+			&nRebuiltLength, &bRebuilt );
+		if ( status == SOURCE_ABI_OK )
+		{
+			if ( !bRebuilt )
+				return false;
+			Q_memcpy( packet->data, entry->netsplit.buffer, static_cast<int>( nRebuiltLength ) );
+			packet->size = static_cast<int>( nRebuiltLength );
+			packet->wiresize = static_cast<int>( nRebuiltLength );
+			return true;
+		}
+		if ( status == SOURCE_ABI_FORMAT_ERROR )
+		{
+			// The piece cannot be placed at all. Holding the peer off keeps a
+			// sender that is contradicting itself from being retried into.
+			entry->lastactivetime = net_time + SPLIT_PACKET_STALE_TIME;
+			return false;
+		}
+	}
+#endif
 
 	// First packet in split series?
 	if ( entry->netsplit.currentSequence == -1 || 
@@ -2258,7 +2323,17 @@ int NET_SendLong( INetChannel *chan, int sock, SOCKET s, const char FAR * buf, i
 		int size = min( (int)nSplitSizeMinusHeader, nBytesLeft );
 
 		pPacket->packetID = LittleShort( (short)(( nPacketNumber << 8 ) + nPacketCount) );
-		
+
+#if defined( SOURCE_RUST_ENGINE )
+		// Rust lays out the header the receiving side reads, so the two stay
+		// described in one place. It refuses anything the wire cannot carry,
+		// such as more pieces than the single count byte can name, and the
+		// native bytes written just above stand in that case.
+		source_rust_bridge_split_packet_header_encode( nSequenceNumber,
+			static_cast<uint32_t>( nPacketNumber ), static_cast<uint32_t>( nPacketCount ),
+			static_cast<uint32_t>( nSplitSizeMinusHeader ), packet );
+#endif
+
 		Q_memcpy( packet + sizeof(SPLITPACKET), sendbuf + (nPacketNumber * nSplitSizeMinusHeader), size );
 		
 		int ret = 0;

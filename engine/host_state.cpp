@@ -40,6 +40,9 @@
 #endif
 #include "GameEventManager.h"
 #include "tier0/etwprof.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 #include "ccs.h"
 
@@ -110,6 +113,114 @@ public:
 static bool Host_ValidGame( void );
 static CHostState	g_HostState;
 
+#if defined( SOURCE_RUST_ENGINE )
+static bool HostState_QueueRustOperation( uint32_t kind, const char *target,
+	const char *landmark, uint32_t flags )
+{
+	const char *safeTarget = target ? target : "";
+	const char *safeLandmark = landmark ? landmark : "";
+	const SourceAbiStatus status = source_rust_bridge_host_request_operation(
+		kind, safeTarget, Q_strlen( safeTarget ), safeLandmark,
+		Q_strlen( safeLandmark ), flags );
+	if ( status == SOURCE_ABI_OK )
+		return true;
+	Warning( "Rust host operation request %u failed with status %d; using legacy state slot\n",
+		kind, status );
+	return false;
+}
+
+static const char *HostState_RustOperationName( uint32_t kind )
+{
+	switch ( kind )
+	{
+	case SOURCE_HOST_OPERATION_NEW_GAME: return "new-game";
+	case SOURCE_HOST_OPERATION_LOAD_GAME: return "load-game";
+	case SOURCE_HOST_OPERATION_CHANGE_LEVEL_SP: return "change-level-sp";
+	case SOURCE_HOST_OPERATION_CHANGE_LEVEL_MP: return "change-level-mp";
+	case SOURCE_HOST_OPERATION_GAME_SHUTDOWN: return "game-shutdown";
+	case SOURCE_HOST_OPERATION_SHUTDOWN: return "shutdown";
+	case SOURCE_HOST_OPERATION_RESTART: return "restart";
+	default: return "invalid";
+	}
+}
+
+static void HostState_ApplyRustOperation()
+{
+	char target[256] = {};
+	char landmark[256] = {};
+	SourceAbiHostOperationInfo info = {};
+	const SourceAbiStatus status = source_rust_bridge_host_take_operation(
+		target, sizeof( target ) - 1, landmark, sizeof( landmark ) - 1, &info );
+	if ( status == SOURCE_ABI_NOT_FOUND )
+		return;
+	if ( status != SOURCE_ABI_OK || info.target_length >= sizeof( target ) ||
+		info.landmark_length >= sizeof( landmark ) )
+	{
+		Host_Error( "Rust host operation consume failed: %d", status );
+		return;
+	}
+	target[info.target_length] = 0;
+	landmark[info.landmark_length] = 0;
+
+	switch ( info.kind )
+	{
+	case SOURCE_HOST_OPERATION_NEW_GAME:
+		Q_strncpy( g_HostState.m_levelName, target, sizeof( g_HostState.m_levelName ) );
+		g_HostState.m_landmarkName[0] = 0;
+		g_HostState.m_bRememberLocation =
+			( info.flags & SOURCE_HOST_OPERATION_REMEMBER_LOCATION ) != 0;
+		g_HostState.m_bBackgroundLevel =
+			( info.flags & SOURCE_HOST_OPERATION_BACKGROUND_LEVEL ) != 0;
+		g_HostState.m_bWaitingForConnection = true;
+		if ( g_HostState.m_bRememberLocation )
+			g_HostState.RememberLocation();
+		g_HostState.SetNextState( HS_NEW_GAME );
+		break;
+	case SOURCE_HOST_OPERATION_LOAD_GAME:
+		Q_strncpy( g_HostState.m_saveName, target, sizeof( g_HostState.m_saveName ) );
+		g_HostState.m_bRememberLocation =
+			( info.flags & SOURCE_HOST_OPERATION_REMEMBER_LOCATION ) != 0;
+		g_HostState.m_bBackgroundLevel = false;
+		g_HostState.m_bWaitingForConnection = true;
+		if ( g_HostState.m_bRememberLocation )
+			g_HostState.RememberLocation();
+		g_HostState.SetNextState( HS_LOAD_GAME );
+		break;
+	case SOURCE_HOST_OPERATION_CHANGE_LEVEL_SP:
+	case SOURCE_HOST_OPERATION_CHANGE_LEVEL_MP:
+		Q_strncpy( g_HostState.m_levelName, target, sizeof( g_HostState.m_levelName ) );
+		Q_strncpy( g_HostState.m_landmarkName, landmark,
+			sizeof( g_HostState.m_landmarkName ) );
+		g_HostState.SetNextState( info.kind == SOURCE_HOST_OPERATION_CHANGE_LEVEL_SP
+			? HS_CHANGE_LEVEL_SP : HS_CHANGE_LEVEL_MP );
+		break;
+	case SOURCE_HOST_OPERATION_GAME_SHUTDOWN:
+		g_HostState.SetNextState( HS_GAME_SHUTDOWN );
+		break;
+	case SOURCE_HOST_OPERATION_SHUTDOWN:
+		g_HostState.SetNextState( HS_SHUTDOWN );
+		break;
+	case SOURCE_HOST_OPERATION_RESTART:
+		g_HostState.SetNextState( HS_RESTART );
+		break;
+	default:
+		Host_Error( "Rust host returned invalid operation %u", info.kind );
+		return;
+	}
+
+	Msg( "Rust host operation: %s%s%s\n", HostState_RustOperationName( info.kind ),
+		target[0] ? " " : "", target );
+}
+
+static bool HostState_RustOperationPending( uint32_t kindA, uint32_t kindB = 0,
+	uint32_t kindC = 0 )
+{
+	uint32_t kind = 0;
+	const SourceAbiStatus status = source_rust_bridge_host_pending_operation( &kind );
+	return status == SOURCE_ABI_OK && ( kind == kindA || kind == kindB || kind == kindC );
+}
+#endif
+
 
 //-----------------------------------------------------------------------------
 // external API for manipulating the host state machine
@@ -117,10 +228,18 @@ static CHostState	g_HostState;
 void HostState_Init()
 {
 	g_HostState.Init();
+#if defined( SOURCE_RUST_ENGINE )
+	const SourceAbiStatus status = source_rust_bridge_host_clear_operation();
+	if ( status != SOURCE_ABI_OK )
+		Warning( "Rust host operation reset failed with status %d\n", status );
+#endif
 }
 
 void HostState_Frame( float time )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	HostState_ApplyRustOperation();
+#endif
 	g_HostState.FrameUpdate( time );
 }
 
@@ -135,6 +254,14 @@ void HostState_RunGameInit()
 //-----------------------------------------------------------------------------
 void HostState_NewGame( char const *pMapName, bool remember_location, bool background )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	uint32_t flags = remember_location ? SOURCE_HOST_OPERATION_REMEMBER_LOCATION : 0;
+	if ( background )
+		flags |= SOURCE_HOST_OPERATION_BACKGROUND_LEVEL;
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_NEW_GAME,
+		pMapName, "", flags ) )
+		return;
+#endif
 	Q_strncpy( g_HostState.m_levelName, pMapName, sizeof( g_HostState.m_levelName ) );
 
 	g_HostState.m_landmarkName[0] = 0;
@@ -167,6 +294,12 @@ void HostState_LoadGame( char const *pSaveFileName, bool remember_location )
 	// Tell the game .dll we are loading another game
 	serverGameDLL->PreSaveGameLoaded( pSaveFileName, sv.IsActive() );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_LOAD_GAME,
+		pSaveFileName, "", remember_location ? SOURCE_HOST_OPERATION_REMEMBER_LOCATION : 0 ) )
+		return;
+#endif
+
 	g_HostState.m_bRememberLocation = remember_location;
 	g_HostState.m_bBackgroundLevel = false;
 	g_HostState.m_bWaitingForConnection = true;
@@ -182,6 +315,11 @@ void HostState_LoadGame( char const *pSaveFileName, bool remember_location )
 // change level (single player style - smooth transition)
 void HostState_ChangeLevelSP( char const *pNewLevel, char const *pLandmarkName )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_CHANGE_LEVEL_SP,
+		pNewLevel, pLandmarkName, 0 ) )
+		return;
+#endif
 	Q_strncpy( g_HostState.m_levelName, pNewLevel, sizeof( g_HostState.m_levelName ) );
 	Q_strncpy( g_HostState.m_landmarkName, pLandmarkName, sizeof( g_HostState.m_landmarkName ) );
 	g_HostState.SetNextState( HS_CHANGE_LEVEL_SP );
@@ -191,6 +329,12 @@ void HostState_ChangeLevelSP( char const *pNewLevel, char const *pLandmarkName )
 void HostState_ChangeLevelMP( char const *pNewLevel, char const *pLandmarkName )
 {
 	Steam3Server().NotifyOfLevelChange();
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_CHANGE_LEVEL_MP,
+		pNewLevel, pLandmarkName, 0 ) )
+		return;
+#endif
 
 	Q_strncpy( g_HostState.m_levelName, pNewLevel, sizeof( g_HostState.m_levelName ) );
 	Q_strncpy( g_HostState.m_landmarkName, pLandmarkName, sizeof( g_HostState.m_landmarkName ) );
@@ -208,6 +352,11 @@ void HostState_GameShutdown()
 		 g_HostState.m_currentState != HS_GAME_SHUTDOWN
 		 )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_GAME_SHUTDOWN,
+			"", "", 0 ) )
+			return;
+#endif
 		g_HostState.SetNextState( HS_GAME_SHUTDOWN );
 	}
 }
@@ -224,6 +373,10 @@ void HostState_Shutdown()
 	}
 #endif
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_SHUTDOWN, "", "", 0 ) )
+		return;
+#endif
 	g_HostState.SetNextState( HS_SHUTDOWN );
 }
 
@@ -232,16 +385,29 @@ void HostState_Shutdown()
 //-----------------------------------------------------------------------------
 void HostState_Restart()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_QueueRustOperation( SOURCE_HOST_OPERATION_RESTART, "", "", 0 ) )
+		return;
+#endif
 	g_HostState.SetNextState( HS_RESTART );
 }
 
 bool HostState_IsGameShuttingDown()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_RustOperationPending( SOURCE_HOST_OPERATION_GAME_SHUTDOWN ) )
+		return true;
+#endif
 	return g_HostState.IsGameShuttingDown();
 }
 
 bool HostState_IsShuttingDown()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( HostState_RustOperationPending( SOURCE_HOST_OPERATION_GAME_SHUTDOWN,
+		SOURCE_HOST_OPERATION_SHUTDOWN, SOURCE_HOST_OPERATION_RESTART ) )
+		return true;
+#endif
 	return ( g_HostState.m_currentState == HS_SHUTDOWN ||
 		g_HostState.m_currentState == HS_RESTART ||
 			g_HostState.m_currentState == HS_GAME_SHUTDOWN );
@@ -503,6 +669,12 @@ void CHostState::State_Run( float frameTime )
 	}
 
 	Host_RunFrame( frameTime );
+
+#if defined( SOURCE_RUST_ENGINE )
+	// Requests raised by commands or game code during Host_RunFrame must affect
+	// this frame's transition switch, matching the legacy next-state timing.
+	HostState_ApplyRustOperation();
+#endif
 
 	if ( sv.IsDedicated() )
 	{
@@ -796,4 +968,3 @@ static bool Host_ValidGame( void )
 	ConDMsg("Unable to launch game\n");
 	return false;
 }
-

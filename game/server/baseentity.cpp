@@ -5342,7 +5342,11 @@ class CEntFireAutoCompletionFunctor : public ICommandCallback, public ICommandCo
 public:
 	virtual void CommandCallback( const CCommand &command )
 	{
-		CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClient() );
+		// Falls back to the listen server host the way ent_create does, so a
+		// test script or server console issuing this without an associated
+		// client still targets the local player instead of silently doing
+		// nothing.
+		CBasePlayer *pPlayer = ToBasePlayer( UTIL_GetCommandClientOrHost() );
 		if (!pPlayer)
 		{
 			return;
@@ -7329,7 +7333,7 @@ void CC_Ent_Create( const CCommand& args )
 {
 	MDLCACHE_CRITICAL_SECTION();
 
-	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
 	if (!pPlayer)
 	{
 		return;
@@ -7424,7 +7428,10 @@ bool CC_GetCommandEnt( const CCommand& args, CBaseEntity **ent, Vector *vecTarge
 		return false;
 	}
 
-	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	CBasePlayer *pPlayer = UTIL_GetCommandClientOrHost();
+	if ( !pPlayer )
+		return false;
+
 	if ( vecTargetPoint )
 	{
 		trace_t tr;

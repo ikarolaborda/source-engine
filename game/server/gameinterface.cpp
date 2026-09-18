@@ -303,6 +303,29 @@ CBasePlayer *UTIL_GetCommandClient( void )
 }
 
 //-----------------------------------------------------------------------------
+// Purpose: Resolve the player a console-issued command should act on.
+// Output : CBasePlayer
+//-----------------------------------------------------------------------------
+CBasePlayer *UTIL_GetCommandClientOrHost( void )
+{
+	CBasePlayer *pPlayer = UTIL_GetCommandClient();
+	if ( pPlayer )
+	{
+		return pPlayer;
+	}
+
+	// The command came from the server console, a config file, or a test
+	// script rather than from a client. On a listen server the local host is
+	// the intended subject; a dedicated server has no such player.
+	if ( engine->IsDedicatedServer() )
+	{
+		return NULL;
+	}
+
+	return UTIL_PlayerByIndex( 1 );
+}
+
+//-----------------------------------------------------------------------------
 // Purpose: Retrieves the MOD directory for the active game (ie. "hl2")
 //-----------------------------------------------------------------------------
 

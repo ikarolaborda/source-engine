@@ -122,6 +122,9 @@
 #include "soundservice.h"
 #include "profile.h"
 #include "steam/isteamremotestorage.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 #if defined( _X360 )
 #include "xbox/xbox_win32stubs.h"
 #include "audio_pch.h"
@@ -3051,7 +3054,11 @@ extern ConVar sv_alternateticks;
 void _Host_RunFrame (float time)
 {
 	MDLCACHE_COARSE_LOCK_(g_pMDLCache);
+#if defined( SOURCE_RUST_ENGINE )
+	double host_remainder = 0.0f;
+#else
 	static double host_remainder = 0.0f;
+#endif
 	double prevremainder;
 	bool shouldrender;
 
@@ -3103,14 +3110,41 @@ void _Host_RunFrame (float time)
 
 		shouldrender = !sv.IsDedicated();
 
+#if defined( SOURCE_RUST_ENGINE )
+		bool accumulateTicks = true;
+#if !defined( SWDS )
+		accumulateTicks = !demoplayer->IsPlaybackPaused();
+#endif
+		SourceAbiTickPlan tickPlan = {};
+		const SourceAbiStatus tickStatus = source_rust_bridge_host_schedule_ticks(
+			host_frametime, host_state.interval_per_tick,
+			g_ServerGlobalVariables.tickcount, accumulateTicks,
+			Host_IsSinglePlayerGame() && sv_alternateticks.GetBool(), &tickPlan );
+		if ( tickStatus != SOURCE_ABI_OK )
+		{
+			Sys_Error( "Rust host tick scheduling failed: %d", tickStatus );
+			return;
+		}
+		prevremainder = tickPlan.previous_remainder;
+		host_remainder = tickPlan.remainder;
+		host_nexttick = tickPlan.next_tick;
+		numticks = (int)tickPlan.tick_count;
+		static bool s_bReportedRustTickScheduler = false;
+		if ( !s_bReportedRustTickScheduler )
+		{
+			Msg( "Rust host tick scheduler active: %.9f second interval\n",
+				host_state.interval_per_tick );
+			s_bReportedRustTickScheduler = true;
+		}
+#else
 		// FIXME:  Could track remainder as fractional ticks instead of msec
 		prevremainder = host_remainder;
 		if ( prevremainder < 0 )
 			prevremainder = 0;
 
-	#if !defined(SWDS)
+#if !defined(SWDS)
 		if ( !demoplayer->IsPlaybackPaused() )
-	#endif
+#endif
 		{
 			host_remainder += host_frametime;
 		}
@@ -3136,6 +3170,7 @@ void _Host_RunFrame (float time)
 		}
 
 		host_nexttick = host_state.interval_per_tick - host_remainder;
+#endif
 
 		g_pMDLCache->MarkFrame();
 	}
@@ -3596,6 +3631,25 @@ Host_Frame
 */
 void Host_RunFrame( float time )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	for ( int commandIndex = 0; commandIndex < 64; ++commandIndex )
+	{
+		char rustCommand[4098];
+		uint64_t rustCommandBytes = 0;
+		const SourceAbiStatus rustStatus = source_rust_bridge_command_pop(
+			rustCommand, sizeof( rustCommand ) - 2, &rustCommandBytes );
+		if ( rustStatus == SOURCE_ABI_NOT_FOUND )
+			break;
+		if ( rustStatus != SOURCE_ABI_OK || rustCommandBytes >= sizeof( rustCommand ) - 1 )
+		{
+			Warning( "Rust command queue drain failed with status %d\n", rustStatus );
+			break;
+		}
+		rustCommand[rustCommandBytes++] = '\n';
+		rustCommand[rustCommandBytes] = '\0';
+		Cbuf_AddText( rustCommand );
+	}
+#endif
 	static  double	timetotal = 0;
 	static  int		timecount = 0;
 	static	double  timestart = 0;

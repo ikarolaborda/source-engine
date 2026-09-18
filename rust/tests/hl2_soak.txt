@@ -1,0 +1,48 @@
+// Sixty-minute frame-synchronized soak scenario.
+//
+// The endurance scenario only covers ten minutes of movement. This one runs a
+// full hour with live physics objects present, because the first attempted
+// soak failed inside legacy VPhysics at 148.6 simulated seconds rather than
+// during startup.
+//
+// The wait has to outlast map load, because the script starts running before
+// the player entity exists and every command below needs one.
+Test_Wait 25
+sv_cheats 1
+echo RUST_SOAK_STARTED
+// d1_trainstation_01 opens with a scripted train ride that holds the player
+// in a pod, so the held movement below would simulate nothing there. Soak the
+// first map where the player actually has control.
+changelevel d1_trainstation_02
+Test_Wait 25
+echo RUST_SOAK_WALK_BEFORE
+getpos 2
++forward
+Test_Wait 2
+-forward
+echo RUST_SOAK_WALK_AFTER
+getpos 2
+// Three crates in different directions keep VPhysics carrying real work for
+// the whole hour. Each spawns under the crosshair, so the view moves between
+// them.
+setang 45 0 0
+prop_physics_create props_junk/wood_crate001a.mdl rust_soak_crate_a
+setang 45 120 0
+prop_physics_create props_junk/wood_crate001a.mdl rust_soak_crate_b
+setang 45 240 0
+prop_physics_create props_junk/wood_crate001a.mdl rust_soak_crate_c
+setang 0 0 0
+Test_StartLoop rust_soak
++left
++forward
+Test_Wait 1
+-left
+-forward
++right
++back
+Test_Wait 1
+-right
+-back
+Test_LoopForNumSeconds rust_soak 3600
+echo RUST_SOAK_COMPLETED
+quit

@@ -32,6 +32,9 @@
 #include "vgui_baseui_interface.h"
 #include "con_nprint.h"
 #include "networkstringtableclient.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 #ifdef SWDS
 #include "server.h"
@@ -685,6 +688,31 @@ void CDemoRecorder::CloseDemoFile()
 		}
 
 		m_DemoFile.Close();
+
+#if defined( SOURCE_RUST_ENGINE )
+		if ( !m_bIsDemoHeader )
+		{
+			SourceAbiDemoInfo info = {};
+			const SourceAbiStatus status = source_rust_bridge_demo_validate(
+				m_DemoFile.m_szFileName, Q_strlen( m_DemoFile.m_szFileName ), &info );
+			if ( status == SOURCE_ABI_OK )
+			{
+				Msg( "Rust demo validated: %s, %llu commands, %llu packets, protocol %d, %d ticks, "
+					"%llu string table sections, %llu string table entries\n",
+					m_DemoFile.m_szFileName,
+					static_cast<unsigned long long>( info.command_count ),
+					static_cast<unsigned long long>( info.packet_count ),
+					info.network_protocol, info.playback_ticks,
+					static_cast<unsigned long long>( info.string_table_section_count ),
+					static_cast<unsigned long long>( info.string_table_entry_count ) );
+			}
+			else
+			{
+				Warning( "Rust demo validation failed for %s (status %d)\n",
+					m_DemoFile.m_szFileName, status );
+			}
+		}
+#endif
 
 		if( g_ClientDLL ) g_ClientDLL->OnDemoRecordStop();
 	}

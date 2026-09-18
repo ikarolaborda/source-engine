@@ -13,6 +13,9 @@
 #endif
 #include "framesnapshot.h"
 #include "sys_dll.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -26,6 +29,17 @@ extern	CGlobalVars g_ServerGlobalVariables;
 // Expose interface
 static CFrameSnapshotManager g_FrameSnapshotManager;
 CFrameSnapshotManager *framesnapshotmanager = &g_FrameSnapshotManager;
+
+#if defined( SOURCE_RUST_ENGINE )
+static bool s_bRustSnapshotStateAvailable = true;
+static bool s_bRustSnapshotMarkerPrinted = false;
+
+static void SV_DisableRustSnapshotState()
+{
+	s_bRustSnapshotStateAvailable = false;
+	source_rust_bridge_snapshot_clear();
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -61,6 +75,10 @@ void CFrameSnapshotManager::LevelChanged()
 	m_PackedEntityCache.RemoveAll();
 	COMPILE_TIME_ASSERT( INVALID_PACKED_ENTITY_HANDLE == 0 );
 	Q_memset( m_pPackedData, 0x00, MAX_EDICTS * sizeof(PackedEntityHandle_t) );
+#if defined( SOURCE_RUST_ENGINE )
+	s_bRustSnapshotStateAvailable =
+		source_rust_bridge_snapshot_clear() == SOURCE_ABI_OK;
+#endif
 }
 
 CFrameSnapshot*	CFrameSnapshotManager::NextSnapshot( const CFrameSnapshot *pSnapshot )
@@ -111,6 +129,10 @@ CFrameSnapshot*	CFrameSnapshotManager::CreateEmptySnapshot( int tickcount, int m
 CFrameSnapshot* CFrameSnapshotManager::TakeTickSnapshot( int tickcount )
 {
 	unsigned short nValidEntities[MAX_EDICTS];
+#if defined( SOURCE_RUST_ENGINE )
+	CUtlVector<SourceAbiSnapshotEntity> rustEntities;
+	rustEntities.EnsureCapacity( sv.num_edicts );
+#endif
 
 	CFrameSnapshot *snap = CreateEmptySnapshot( tickcount, sv.num_edicts );
 	
@@ -149,11 +171,83 @@ CFrameSnapshot* CFrameSnapshotManager::TakeTickSnapshot( int tickcount )
 		entry->m_nSerialNumber	= edict->m_NetworkSerialNumber;
 		entry->m_pClass			= edict->GetNetworkable()->GetServerClass();
 		nValidEntities[snap->m_nValidEntities++] = i;
+#if defined( SOURCE_RUST_ENGINE )
+		SourceAbiSnapshotEntity rustEntity = {};
+		rustEntity.entity_index = static_cast<uint32_t>( i );
+		rustEntity.serial_number = entry->m_nSerialNumber;
+		rustEntity.class_id = static_cast<uint32_t>( entry->m_pClass->m_ClassID );
+		rustEntities.AddToTail( rustEntity );
+#endif
 	}
 
-	// create dynamic valid entities array and copy indices
-	snap->m_pValidEntities = new unsigned short[snap->m_nValidEntities];
-	Q_memcpy( snap->m_pValidEntities, nValidEntities, snap->m_nValidEntities * sizeof(unsigned short) );
+#if defined( SOURCE_RUST_ENGINE )
+	bool bUseRustSnapshot = false;
+	if ( s_bRustSnapshotStateAvailable )
+	{
+		uint64_t rustSnapshotId = 0;
+		SourceAbiSnapshotSummary rustSummary = {};
+		const SourceAbiStatus createStatus = source_rust_bridge_snapshot_create(
+			tickcount, static_cast<uint32_t>( snap->m_nNumEntities ), rustEntities.Base(),
+			static_cast<uint64_t>( rustEntities.Count() ), &rustSnapshotId, &rustSummary );
+		bool bValidRustSnapshot = createStatus == SOURCE_ABI_OK && rustSnapshotId != 0 &&
+			rustSummary.tick == tickcount &&
+			rustSummary.max_entities == static_cast<uint32_t>( snap->m_nNumEntities ) &&
+			rustSummary.valid_entity_count == static_cast<uint32_t>( snap->m_nValidEntities ) &&
+			rustSummary.explicit_delete_count ==
+				static_cast<uint32_t>( m_iExplicitDeleteSlots.Count() );
+
+		CUtlVector<int> rustExplicitDeletes;
+		if ( bValidRustSnapshot )
+		{
+			rustExplicitDeletes.SetCount(
+				static_cast<int>( rustSummary.explicit_delete_count ) );
+			for ( uint32_t ordinal = 0; ordinal < rustSummary.explicit_delete_count; ++ordinal )
+			{
+				uint32_t slot = UINT32_MAX;
+				if ( source_rust_bridge_snapshot_delete_at( rustSnapshotId, ordinal,
+					&slot ) != SOURCE_ABI_OK || slot >= MAX_EDICTS ||
+					static_cast<int>( slot ) != m_iExplicitDeleteSlots[ordinal] )
+				{
+					bValidRustSnapshot = false;
+					break;
+				}
+				rustExplicitDeletes[ordinal] = static_cast<int>( slot );
+			}
+		}
+		if ( bValidRustSnapshot )
+		{
+			snap->m_nRustSnapshotId = rustSnapshotId;
+			snap->m_pValidEntities = new unsigned short[snap->m_nValidEntities];
+			Q_memcpy( snap->m_pValidEntities, nValidEntities,
+				snap->m_nValidEntities * sizeof(unsigned short) );
+			snap->m_iExplicitDeleteSlots.CopyArray( rustExplicitDeletes.Base(),
+				rustExplicitDeletes.Count() );
+			bUseRustSnapshot = true;
+			if ( !s_bRustSnapshotMarkerPrinted )
+			{
+				ConMsg( "Rust snapshot state active: tick %d, %u valid entities, %u explicit deletes\n",
+					rustSummary.tick, rustSummary.valid_entity_count,
+					rustSummary.explicit_delete_count );
+				s_bRustSnapshotMarkerPrinted = true;
+			}
+		}
+		else
+		{
+			if ( rustSnapshotId != 0 )
+				source_rust_bridge_snapshot_remove( rustSnapshotId );
+			SV_DisableRustSnapshotState();
+		}
+	}
+	if ( !bUseRustSnapshot )
+#endif
+	{
+		// Native pointer-bearing storage remains the fallback and packed-data owner.
+		snap->m_pValidEntities = new unsigned short[snap->m_nValidEntities];
+		Q_memcpy( snap->m_pValidEntities, nValidEntities,
+			snap->m_nValidEntities * sizeof(unsigned short) );
+		snap->m_iExplicitDeleteSlots.CopyArray( m_iExplicitDeleteSlots.Base(),
+			m_iExplicitDeleteSlots.Count() );
+	}
 
 	if ( hltv && hltv->IsActive() )
 	{
@@ -169,7 +263,6 @@ CFrameSnapshot* CFrameSnapshotManager::TakeTickSnapshot( int tickcount )
 	}
 #endif
 
-	snap->m_iExplicitDeleteSlots.CopyArray( m_iExplicitDeleteSlots.Base(), m_iExplicitDeleteSlots.Count() );
 	m_iExplicitDeleteSlots.Purge();
 
 	return snap;
@@ -189,6 +282,14 @@ void CFrameSnapshotManager::DeleteFrameSnapshot( CFrameSnapshot* pSnapshot )
 			RemoveEntityReference( pSnapshot->m_pEntities[i].m_pPackedData );
 		}
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( pSnapshot->m_nRustSnapshotId != 0 )
+	{
+		source_rust_bridge_snapshot_remove( pSnapshot->m_nRustSnapshotId );
+		pSnapshot->m_nRustSnapshotId = 0;
+	}
+#endif
 
 	m_FrameSnapshots.Remove( pSnapshot->m_ListIndex );
 	delete pSnapshot;
@@ -229,6 +330,18 @@ void CFrameSnapshotManager::AddEntityReference( PackedEntityHandle_t handle )
 void CFrameSnapshotManager::AddExplicitDelete( int iSlot )
 {
 	AUTO_LOCK( m_WriteMutex );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( s_bRustSnapshotStateAvailable )
+	{
+		uint32_t queued = 0;
+		if ( source_rust_bridge_snapshot_queue_delete( static_cast<uint32_t>( iSlot ),
+			&queued ) != SOURCE_ABI_OK )
+		{
+			SV_DisableRustSnapshotState();
+		}
+	}
+#endif
 
 	if ( m_iExplicitDeleteSlots.Find(iSlot) == m_iExplicitDeleteSlots.InvalidIndex() )
 	{
@@ -438,6 +551,7 @@ UnpackedDataCache_t *CFrameSnapshotManager::GetCachedUncompressedEntity( PackedE
 
 CFrameSnapshot::CFrameSnapshot()
 {
+	m_nRustSnapshotId = 0;
 	m_nTempEntities = 0;
 	m_pTempEntities = NULL;
 	m_pValidEntities = NULL;
@@ -504,5 +618,3 @@ CFrameSnapshot* CFrameSnapshot::NextSnapshot() const
 {
 	return g_FrameSnapshotManager.NextSnapshot( this );
 }
-
-

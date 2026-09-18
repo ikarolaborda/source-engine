@@ -13,12 +13,22 @@
 #include "demo.h"
 #include "proto_version.h"
 #include "convar.h"	// For dbg_demofile
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 // NOTE: This has to be the last file included!
 #include "tier0/memdbgon.h"
 
 
 void Host_EndGame (bool bShowMainMenu, const char *message, ...);
+
+#if defined( SOURCE_RUST_ENGINE )
+// Rust owns the demo file header bytes, so a recorded demo is encoded by the
+// same implementation that parses it back.
+static bool s_bRustDemoHeaderAvailable = true;
+static bool s_bRustDemoHeaderMarkerPrinted = false;
+#endif
 
 // Debug helpers - this class prints in a nested format
 ConVar dbg_demofile( "dbg_demofile", "0", FCVAR_DEVELOPMENTONLY | FCVAR_HIDDEN );
@@ -415,6 +425,39 @@ void CDemoFile::WriteDemoHeader()
 
 	// Goto file start
 	m_pBuffer->SeekPut( CUtlBuffer::SEEK_HEAD, 0 );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( s_bRustDemoHeaderAvailable )
+	{
+		uint8_t headerBytes[sizeof( demoheader_t )] = {};
+		uint64_t headerSize = 0;
+		const SourceAbiStatus status = source_rust_bridge_demo_header_encode(
+			m_DemoHeader.demoprotocol, m_DemoHeader.networkprotocol,
+			m_DemoHeader.servername, m_DemoHeader.clientname, m_DemoHeader.mapname,
+			m_DemoHeader.gamedirectory, m_DemoHeader.playback_time,
+			m_DemoHeader.playback_ticks, m_DemoHeader.playback_frames,
+			m_DemoHeader.signonlength, headerBytes, sizeof( headerBytes ),
+			&headerSize );
+		if ( status == SOURCE_ABI_OK && headerSize == sizeof( headerBytes ) )
+		{
+			m_pBuffer->Put( headerBytes, static_cast<int>( headerSize ) );
+			if ( !s_bRustDemoHeaderMarkerPrinted )
+			{
+				ConMsg( "Rust demo header encoding active: %s, %llu bytes\n",
+					m_DemoHeader.mapname,
+					static_cast<unsigned long long>( headerSize ) );
+				s_bRustDemoHeaderMarkerPrinted = true;
+			}
+			return;
+		}
+
+		// The encoder refuses anything its own parser would reject, so a
+		// refusal here means the native header would not read back.
+		s_bRustDemoHeaderAvailable = false;
+		ConMsg( "Rust demo header encoding disabled: status %d, %llu bytes\n", status,
+			static_cast<unsigned long long>( headerSize ) );
+	}
+#endif
 
 	// Write
 	m_pBuffer->Put( &m_DemoHeader, sizeof( m_DemoHeader ) );

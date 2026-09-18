@@ -63,6 +63,10 @@
 #include "appframework/IAppSystemGroup.h"
 #include "tier0/systeminformation.h"
 #include "host_cmd.h"
+#include "testscriptmgr.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 #ifdef _WIN32
 #include "VGuiMatSurface/IMatSystemSurface.h"
 #endif
@@ -953,6 +957,16 @@ public:
 	int RunListenServer();
 
 private:
+	int MainLoopIteration( bool &bIdle, long &lIdleCount );
+#if defined( SOURCE_RUST_ENGINE )
+	struct RustMainLoopState
+	{
+		CEngineAPI *engine;
+		bool idle;
+		long idleCount;
+	};
+	static int32_t RustMainLoopIteration( void *userData );
+#endif
 
 	// Hooks a particular mod up to the registry
 	void SetRegistryMod( const char *pModName );
@@ -1206,6 +1220,10 @@ InitReturnVal_t CEngineAPI::Init()
 
 void CEngineAPI::Shutdown() 
 {
+	// A manual or timeout-driven quit can interrupt an active test script.
+	// Close it while the filesystem app system is still connected; waiting for
+	// CTestScriptMgr's module destructor is too late in the unload sequence.
+	GetTestScriptMgr()->Term();
 	VideoMode_Destroy();
 	BaseClass::Shutdown();
 }
@@ -1497,56 +1515,74 @@ void StopGProfiler()
 //-----------------------------------------------------------------------------
 // Purpose: Message pump
 //-----------------------------------------------------------------------------
-bool CEngineAPI::MainLoop()
+int CEngineAPI::MainLoopIteration( bool &bIdle, long &lIdleCount )
 {
-	bool bIdle = true;
-	long lIdleCount = 0;
-
-	// Main message pump
-	while ( true )
+	// Pump messages unless someone wants to quit.
+	if ( eng->GetQuitting() != IEngine::QUIT_NOTQUITTING )
 	{
-		// Pump messages unless someone wants to quit
-		if ( eng->GetQuitting() != IEngine::QUIT_NOTQUITTING )
-		{
-			// We have to explicitly stop the profiler since otherwise symbol
-			// resolution doesn't work correctly.
-			StopGProfiler();
-			if ( eng->GetQuitting() != IEngine::QUIT_TODESKTOP )
-				return true;
-			return false;
-		}
-
-		// Pump the message loop
-		if ( !InEditMode() )
-		{
-			PumpMessages();
-		}
-		else
-		{
-			PumpMessagesEditMode( bIdle, lIdleCount );
-		}
-
-		// Run engine frame + hammer frame
-		if ( !InEditMode() || m_hEditorHWnd )
-		{
-			VCRSyncToken( "Frame" );
-
-		// Deactivate edit mode shaders
-		ActivateEditModeShaders( false );
-
-		eng->Frame();
-
-		// Reactivate edit mode shaders (in Edit mode only...)
-		ActivateEditModeShaders( true );
-		}
-
-		if ( InEditMode() )
-		{
-			g_pHammer->RunFrame();
-		}
+		// We have to explicitly stop the profiler since otherwise symbol
+		// resolution doesn't work correctly.
+		StopGProfiler();
+		return eng->GetQuitting() != IEngine::QUIT_TODESKTOP ? 2 : 1;
 	}
 
-	return false;
+	if ( !InEditMode() )
+		PumpMessages();
+	else
+		PumpMessagesEditMode( bIdle, lIdleCount );
+
+	if ( !InEditMode() || m_hEditorHWnd )
+	{
+		VCRSyncToken( "Frame" );
+		ActivateEditModeShaders( false );
+		eng->Frame();
+		ActivateEditModeShaders( true );
+	}
+
+	if ( InEditMode() )
+		g_pHammer->RunFrame();
+
+	return 0;
+}
+
+#if defined( SOURCE_RUST_ENGINE )
+int32_t CEngineAPI::RustMainLoopIteration( void *userData )
+{
+	RustMainLoopState *state = static_cast<RustMainLoopState *>( userData );
+	if ( !state || !state->engine )
+		return SOURCE_HOST_FRAME_FAILED;
+	return state->engine->MainLoopIteration( state->idle, state->idleCount );
+}
+#endif
+
+bool CEngineAPI::MainLoop()
+{
+#if defined( SOURCE_RUST_ENGINE )
+	RustMainLoopState state = { this, true, 0 };
+	SourceAbiFrameLoopInfo info = {};
+	const SourceAbiStatus status = source_rust_bridge_host_run_frames(
+		RustMainLoopIteration, &state, 0, &info );
+	if ( status != SOURCE_ABI_OK )
+	{
+		Warning( "Rust host frame loop failed with status %d after %llu iterations\n",
+			status, static_cast<unsigned long long>( info.iteration_count ) );
+		return false;
+	}
+	Msg( "Rust host frame loop: %llu iterations, exit %u\n",
+		static_cast<unsigned long long>( info.iteration_count ), info.exit_reason );
+	return info.exit_reason == SOURCE_HOST_FRAME_RESTART;
+#else
+	bool bIdle = true;
+	long lIdleCount = 0;
+	for ( ;; )
+	{
+		const int action = MainLoopIteration( bIdle, lIdleCount );
+		if ( action == 2 )
+			return true;
+		if ( action == 1 )
+			return false;
+	}
+#endif
 }
 
 
@@ -2571,4 +2607,3 @@ CON_COMMAND( dumplongticks, "Enables generating minidumps on long ticks." )
 		}
 	}
 }
-

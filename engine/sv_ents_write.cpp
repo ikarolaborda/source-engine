@@ -21,6 +21,9 @@
 #include "replayserver.h"
 #include "tier0/vcrmode.h"
 #include "framesnapshot.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 
 // memdbgon must be the last include file in a .cpp file!!!
@@ -82,6 +85,139 @@ public:
 	int				m_nTotalGap;
 	int				m_nTotalGapCount; */
 };
+
+#if defined( SOURCE_RUST_ENGINE )
+//-----------------------------------------------------------------------------
+// Rust classification of one receiver's entity delta.
+//
+// Rust decides, per visible entity index, whether the receiver has to create
+// the entity, drop it, or may delta against what it already has. Choosing
+// between resending and preserving a delta candidate stays here, because that
+// comparison needs the packed payloads Rust does not hold.
+//-----------------------------------------------------------------------------
+static bool s_bRustEntityDeltaAvailable = true;
+static bool s_bRustEntityDeltaMarkerPrinted = false;
+
+// Rust also encodes the per-entity header bits that precede each update.
+static bool s_bRustDeltaHeaderAvailable = true;
+static bool s_bRustDeltaHeaderMarkerPrinted = false;
+
+class CRustEntityDelta
+{
+public:
+	// Returns false when this receiver's delta must fall back to the native
+	// classification, either because Rust does not own both snapshots or
+	// because Rust rejected the visibility sets.
+	bool Build( const CEntityWriteInfo &u );
+
+	bool IsActive() const { return m_bActive; }
+
+	// Returns the classification of one entity index, or NULL when the index
+	// takes no part in this delta.
+	const SourceAbiSnapshotDelta *Find( int nEntityIndex ) const;
+
+	void Disable() { m_bActive = false; }
+
+private:
+	static void CollectVisible( const CFrameSnapshot *pSnapshot,
+		const CClientFrame *pFrame, CUtlVector<uint32> &visible );
+
+	bool m_bActive = false;
+	CUtlVector<SourceAbiSnapshotDelta> m_Deltas;
+};
+
+void CRustEntityDelta::CollectVisible( const CFrameSnapshot *pSnapshot,
+	const CClientFrame *pFrame, CUtlVector<uint32> &visible )
+{
+	visible.RemoveAll();
+	visible.EnsureCapacity( pSnapshot->m_nValidEntities );
+
+	// Walk the receiver's transmit bits in ascending order, which is the order
+	// the delta contract requires.
+	for ( int index = pFrame->transmit_entity.FindNextSetBit( 0 ); index >= 0;
+		index = pFrame->transmit_entity.FindNextSetBit( index + 1 ) )
+	{
+		visible.AddToTail( static_cast<uint32>( index ) );
+	}
+}
+
+bool CRustEntityDelta::Build( const CEntityWriteInfo &u )
+{
+	m_bActive = false;
+	m_Deltas.RemoveAll();
+
+	if ( !s_bRustEntityDeltaAvailable || u.m_pToSnapshot == NULL ||
+		u.m_pToSnapshot->m_nRustSnapshotId == 0 )
+		return false;
+	if ( u.m_bAsDelta && ( u.m_pFromSnapshot == NULL ||
+		u.m_pFromSnapshot->m_nRustSnapshotId == 0 ) )
+		return false;
+
+	CUtlVector<uint32> toVisible;
+	CollectVisible( u.m_pToSnapshot, u.m_pTo, toVisible );
+
+	CUtlVector<uint32> fromVisible;
+	if ( u.m_bAsDelta )
+	{
+		CollectVisible( u.m_pFromSnapshot, u.m_pFrom, fromVisible );
+	}
+
+	// One index can appear on both sides but yields a single entry, so the
+	// combined visible count is a safe upper bound.
+	m_Deltas.SetCount( toVisible.Count() + fromVisible.Count() );
+	uint64_t count = 0;
+	const SourceAbiStatus status = source_rust_bridge_snapshot_delta(
+		u.m_bAsDelta ? u.m_pFromSnapshot->m_nRustSnapshotId : 0,
+		u.m_bAsDelta ? fromVisible.Base() : NULL,
+		u.m_bAsDelta ? static_cast<uint64_t>( fromVisible.Count() ) : 0,
+		u.m_pToSnapshot->m_nRustSnapshotId, toVisible.Base(),
+		static_cast<uint64_t>( toVisible.Count() ), m_Deltas.Base(),
+		static_cast<uint64_t>( m_Deltas.Count() ), &count );
+	if ( status != SOURCE_ABI_OK || count > static_cast<uint64_t>( m_Deltas.Count() ) )
+	{
+		m_Deltas.RemoveAll();
+		// A rejected visibility set means the Rust and native views disagree
+		// about this frame, which the native path has to resolve.
+		s_bRustEntityDeltaAvailable = false;
+		ConMsg( "Rust entity delta classification disabled: status %d\n", status );
+		return false;
+	}
+
+	m_Deltas.SetCountNonDestructively( static_cast<int>( count ) );
+	m_bActive = true;
+
+	if ( !s_bRustEntityDeltaMarkerPrinted )
+	{
+		ConMsg( "Rust entity delta classification active: tick %d, %d visible, %d classified\n",
+			u.m_pToSnapshot->m_nTickCount, toVisible.Count(), m_Deltas.Count() );
+		s_bRustEntityDeltaMarkerPrinted = true;
+	}
+
+	return true;
+}
+
+const SourceAbiSnapshotDelta *CRustEntityDelta::Find( int nEntityIndex ) const
+{
+	if ( !m_bActive || nEntityIndex < 0 )
+		return NULL;
+
+	// Entries are ascending by entity index.
+	int low = 0;
+	int high = m_Deltas.Count() - 1;
+	while ( low <= high )
+	{
+		const int middle = low + ( high - low ) / 2;
+		const uint32 index = m_Deltas[middle].entity_index;
+		if ( index == static_cast<uint32>( nEntityIndex ) )
+			return &m_Deltas[middle];
+		if ( index < static_cast<uint32>( nEntityIndex ) )
+			low = middle + 1;
+		else
+			high = middle - 1;
+	}
+	return NULL;
+}
+#endif // SOURCE_RUST_ENGINE
 
 
 
@@ -215,6 +351,37 @@ static inline void SV_WriteDeltaHeader(
 	Assert ( offset >= 0 );
 
 	SyncTag_Write( u.m_pBuf, "Hdr" );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( s_bRustDeltaHeaderAvailable )
+	{
+		uint8_t headerBytes[SOURCE_MAX_DELTA_HEADER_BYTES] = {};
+		uint32_t headerBits = 0;
+		const SourceAbiStatus status = source_rust_bridge_delta_header_encode(
+			static_cast<uint32_t>( entnum ), u.m_nHeaderBase,
+			( flags & FHDR_LEAVEPVS ) != 0,
+			( flags & FHDR_LEAVEPVS ) != 0 && ( flags & FHDR_DELETE ) != 0,
+			( flags & FHDR_LEAVEPVS ) == 0 && ( flags & FHDR_ENTERPVS ) != 0,
+			headerBytes, sizeof( headerBytes ), &headerBits );
+		if ( status == SOURCE_ABI_OK && headerBits > 0 )
+		{
+			// Rust packs the bits in wire order, so they append unchanged.
+			pBuf->WriteBits( headerBytes, static_cast<int>( headerBits ) );
+			if ( !s_bRustDeltaHeaderMarkerPrinted )
+			{
+				ConMsg( "Rust delta header encoding active: entity %d, %u bits\n",
+					entnum, headerBits );
+				s_bRustDeltaHeaderMarkerPrinted = true;
+			}
+			SV_UpdateHeaderDelta( u, entnum );
+			return;
+		}
+
+		s_bRustDeltaHeaderAvailable = false;
+		ConMsg( "Rust delta header encoding disabled: entity %d, status %d\n", entnum,
+			status );
+	}
+#endif
 
 	pBuf->WriteUBitVar( offset );
 
@@ -419,7 +586,11 @@ static inline void SV_WritePropsFromPackedEntity(
 //			*to - 
 // Output : Returns true on success, false on failure.
 //-----------------------------------------------------------------------------
+#if defined( SOURCE_RUST_ENGINE )
+static bool SV_NeedsExplicitCreate( CEntityWriteInfo &u, CRustEntityDelta &rustDelta )
+#else
 static bool SV_NeedsExplicitCreate( CEntityWriteInfo &u )
+#endif
 {
 	// Never on uncompressed packet
 	if ( !u.m_bAsDelta )
@@ -428,6 +599,27 @@ static bool SV_NeedsExplicitCreate( CEntityWriteInfo &u )
 	}
 
 	const int index = u.m_nNewEntity;
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( const SourceAbiSnapshotDelta *pRustEntry = rustDelta.Find( index ) )
+	{
+		// Rust already compared the two snapshot identities at this index, so
+		// its recreate decision is the authority here.
+		if ( pRustEntry->kind == SOURCE_SNAPSHOT_DELTA_LEAVE_PVS )
+		{
+			// The writer only asks about an index present in both sides, so a
+			// removal here means the two views disagree.
+			rustDelta.Disable();
+			s_bRustEntityDeltaAvailable = false;
+			ConMsg( "Rust entity delta classification disabled: entity %d classified as a removal\n",
+				index );
+		}
+		else
+		{
+			return pRustEntry->recreated != 0;
+		}
+	}
+#endif
 
 	if ( index >= u.m_pFromSnapshot->m_nNumEntities )
 		return true; // entity didn't exist in old frame, so create
@@ -458,7 +650,27 @@ static bool SV_NeedsExplicitCreate( CEntityWriteInfo &u )
 }
 
 
+#if defined( SOURCE_RUST_ENGINE )
+// Confirms that Rust reached the same enter/remove conclusion as the cursor
+// walk. A disagreement means the two views of this frame have diverged, so the
+// native classification takes over for the rest of the session.
+static inline void SV_ConfirmRustUpdateType( CRustEntityDelta &rustDelta, int nEntityIndex,
+	uint32 expectedKind )
+{
+	const SourceAbiSnapshotDelta *pRustEntry = rustDelta.Find( nEntityIndex );
+	if ( pRustEntry != NULL && pRustEntry->kind == expectedKind )
+		return;
+
+	rustDelta.Disable();
+	s_bRustEntityDeltaAvailable = false;
+	ConMsg( "Rust entity delta classification disabled: entity %d expected kind %u, got %d\n",
+		nEntityIndex, expectedKind, pRustEntry ? static_cast<int>( pRustEntry->kind ) : -1 );
+}
+
+static inline void SV_DetermineUpdateType( CEntityWriteInfo &u, CRustEntityDelta &rustDelta )
+#else
 static inline void SV_DetermineUpdateType( CEntityWriteInfo &u )
+#endif
 {
 	// Figure out how we want to update the entity.
 	if( u.m_nNewEntity < u.m_nOldEntity )
@@ -466,6 +678,13 @@ static inline void SV_DetermineUpdateType( CEntityWriteInfo &u )
 		// If the entity was not in the old packet (oldnum == 9999), then 
 		// delta from the baseline since this is a new entity.
 		u.m_UpdateType = EnterPVS;
+#if defined( SOURCE_RUST_ENGINE )
+		if ( rustDelta.IsActive() )
+		{
+			SV_ConfirmRustUpdateType( rustDelta, u.m_nNewEntity,
+				SOURCE_SNAPSHOT_DELTA_ENTER_PVS );
+		}
+#endif
 		return;
 	}
 	
@@ -474,12 +693,23 @@ static inline void SV_DetermineUpdateType( CEntityWriteInfo &u )
 		// If the entity was in the old list, but is not in the new list 
 		// (newnum == 9999), then construct a special remove message.
 		u.m_UpdateType = LeavePVS;
+#if defined( SOURCE_RUST_ENGINE )
+		if ( rustDelta.IsActive() )
+		{
+			SV_ConfirmRustUpdateType( rustDelta, u.m_nOldEntity,
+				SOURCE_SNAPSHOT_DELTA_LEAVE_PVS );
+		}
+#endif
 		return;
 	}
 	
 	Assert( u.m_pToSnapshot->m_pEntities[ u.m_nNewEntity ].m_pClass );
 
+#if defined( SOURCE_RUST_ENGINE )
+	bool recreate = SV_NeedsExplicitCreate( u, rustDelta );
+#else
 	bool recreate = SV_NeedsExplicitCreate( u );
+#endif
 	
 	if ( recreate )
 	{
@@ -954,6 +1184,13 @@ void CBaseServer::WriteDeltaEntities( CBaseClient *client, CClientFrame *to, CCl
 	// Don't work too hard if we're using the optimized single-player mode.
 	if ( !g_pLocalNetworkBackdoor )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		// Classify this receiver's whole delta before writing any of it, so
+		// each entity decision reads an already-agreed answer.
+		CRustEntityDelta rustDelta;
+		rustDelta.Build( u );
+#endif
+
 		// Iterate through the in PVS bitfields until we find an entity 
 		// that was either in the old pack or the new pack
 		u.NextOldEntity();
@@ -966,7 +1203,11 @@ void CBaseServer::WriteDeltaEntities( CBaseClient *client, CClientFrame *to, CCl
 			int nEntityStartBit = pBuf.GetNumBitsWritten();
 
 			// Figure out how we want to write this entity.
+#if defined( SOURCE_RUST_ENGINE )
+			SV_DetermineUpdateType( u, rustDelta );
+#else
 			SV_DetermineUpdateType( u  );
+#endif
 			SV_WriteEntityUpdate( u );
 
 			if ( !bIsTracing )

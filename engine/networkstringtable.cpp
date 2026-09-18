@@ -18,12 +18,21 @@
 #include <tier1/utlhashtable.h>
 #include <tier0/etwprof.h>
 
+#if defined( SOURCE_RUST_ENGINE )
+#include "../appframework/rust_engine_bridge.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 ConVar sv_dumpstringtables( "sv_dumpstringtables", "0", FCVAR_CHEAT );
 ConVar sv_compressstringtablebaselines_threshhold( "sv_compressstringtablebaselines_threshold", "2048", 0, "Minimum size (in bytes) for stringtablebaseline buffer to be compressed." );
 
 #define SUBSTRING_BITS	5
+#if defined( SOURCE_RUST_ENGINE )
+static bool s_bRustStringTableMarkerPrinted = false;
+static bool s_bRustStringTableEncodeAvailable = true;
+static bool s_bRustStringTableEncodeMarkerPrinted = false;
+#endif
 struct StringHistoryEntry
 {
 	char string[ (1<<SUBSTRING_BITS) ];
@@ -206,6 +215,9 @@ CNetworkStringTable::CNetworkStringTable( TABLEID id, const char *tableName, int
 	m_bAllowClientSideAddString( false ),
 	m_pItemsClientSide( NULL )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	m_RustTableId = 0;
+#endif
 	m_id = id;
 	int len = strlen( tableName ) + 1;
 	m_pszTableName = new char[ len ];
@@ -258,6 +270,23 @@ CNetworkStringTable::CNetworkStringTable( TABLEID id, const char *tableName, int
 		m_bIsFilenames = false;
 		m_pItems = new CNetworkStringDict;
 	}
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( source_rust_bridge_string_table_create( tableName, strlen( tableName ),
+		static_cast<uint32_t>( maxentries ), m_nTickCount,
+		&m_RustTableId ) == SOURCE_ABI_OK )
+	{
+		if ( !s_bRustStringTableMarkerPrinted )
+		{
+			ConMsg( "Rust network string tables active: %s\n", tableName );
+			s_bRustStringTableMarkerPrinted = true;
+		}
+	}
+	else
+	{
+		m_RustTableId = 0;
+	}
+#endif
 }
 
 void CNetworkStringTable::SetAllowClientSideAddString( bool state )
@@ -320,6 +349,13 @@ int	CNetworkStringTable::GetUserDataSizeBits() const
 //-----------------------------------------------------------------------------
 CNetworkStringTable::~CNetworkStringTable( void )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 )
+	{
+		source_rust_bridge_string_table_remove( m_RustTableId );
+		m_RustTableId = 0;
+	}
+#endif
 	delete[] m_pszTableName;
 	delete m_pItems;
 	delete m_pItemsClientSide;
@@ -330,6 +366,13 @@ CNetworkStringTable::~CNetworkStringTable( void )
 //-----------------------------------------------------------------------------
 void CNetworkStringTable::DeleteAllStrings( void )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 &&
+		source_rust_bridge_string_table_clear( m_RustTableId ) != SOURCE_ABI_OK )
+	{
+		m_RustTableId = 0;
+	}
+#endif
 	delete m_pItems;
 	if ( m_bIsFilenames )
 	{
@@ -405,6 +448,13 @@ int CNetworkStringTable::GetEntryBits( void ) const
 void CNetworkStringTable::SetTick(int tick_count)
 {
 	Assert( tick_count >= m_nTickCount );
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 &&
+		source_rust_bridge_string_table_set_tick( m_RustTableId, tick_count ) != SOURCE_ABI_OK )
+	{
+		m_RustTableId = 0;
+	}
+#endif
 	m_nTickCount = tick_count;
 }
 
@@ -427,6 +477,13 @@ void CNetworkStringTable::EnableRollback()
 {
 	// stringtable must be empty 
 	Assert( m_pItems->Count() == 0);
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 &&
+		source_rust_bridge_string_table_enable_history( m_RustTableId ) != SOURCE_ABI_OK )
+	{
+		m_RustTableId = 0;
+	}
+#endif
 	m_bChangeHistoryEnabled = true;
 }
 
@@ -451,6 +508,18 @@ void CNetworkStringTable::RestoreTick(int tick)
 		if ( tickChanged > m_nLastChangedTick )
 			m_nLastChangedTick = tickChanged;
 	}
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 )
+	{
+		int32_t rustLastChangedTick = 0;
+		if ( source_rust_bridge_string_table_restore_tick( m_RustTableId, tick,
+			&rustLastChangedTick ) != SOURCE_ABI_OK ||
+			rustLastChangedTick != m_nLastChangedTick )
+		{
+			m_RustTableId = 0;
+		}
+	}
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -737,6 +806,14 @@ void CNetworkStringTable::CopyStringTable(CNetworkStringTable * table)
 		CNetworkStringTableItem	*item = &table->m_pItems->Element( i );
 
 		m_nTickCount = item->m_nTickChanged;
+#if defined( SOURCE_RUST_ENGINE )
+		if ( m_RustTableId != 0 &&
+			source_rust_bridge_string_table_synchronize_tick( m_RustTableId,
+				m_nTickCount ) != SOURCE_ABI_OK )
+		{
+			m_RustTableId = 0;
+		}
+#endif
 
 		AddString( true, table->GetString( i ), item->m_nUserDataLength, item->m_pUserData );
 	}
@@ -788,6 +865,17 @@ void CNetworkStringTable::SetStringChangedCallback( void *object, pfnStringChang
 //-----------------------------------------------------------------------------
 bool CNetworkStringTable::ChangedSinceTick( int tick ) const
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 )
+	{
+		uint32_t changed = 0;
+		if ( source_rust_bridge_string_table_changed_since( m_RustTableId,
+			tick, &changed ) == SOURCE_ABI_OK )
+		{
+			return changed != 0;
+		}
+	}
+#endif
 	return ( m_nLastChangedTick > tick );
 }
 
@@ -800,6 +888,10 @@ int CNetworkStringTable::AddString( bool bIsServer, const char *string, int leng
 {
 	bool bHasChanged;
 	CNetworkStringTableItem *item;
+#if defined( SOURCE_RUST_ENGINE )
+	bool bRustUpserted = false;
+	SourceAbiStringTableUpsert rustUpsert;
+#endif
 	
 	if ( !string )
 	{
@@ -885,6 +977,29 @@ int CNetworkStringTable::AddString( bool bIsServer, const char *string, int leng
 	}
 	else
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		if ( m_RustTableId != 0 )
+		{
+			const bool updateUserData = length > -1;
+			const uint64_t userDataLength = updateUserData ? static_cast<uint64_t>( length ) : 0;
+			const SourceAbiStatus status = source_rust_bridge_string_table_upsert(
+				m_RustTableId, string, strlen( string ), updateUserData,
+				userdata, userDataLength, &rustUpsert );
+			if ( status == SOURCE_ABI_OK )
+			{
+				bRustUpserted = true;
+			}
+			else if ( status == SOURCE_ABI_BUFFER_TOO_SMALL ||
+				status == SOURCE_ABI_INVALID_ARGUMENT || status == SOURCE_ABI_FORMAT_ERROR )
+			{
+				return INVALID_STRING_INDEX;
+			}
+			else
+			{
+				m_RustTableId = 0;
+			}
+		}
+#endif
 		// See if it's already there
 		i = m_pItems->Find( string );
 
@@ -939,6 +1054,15 @@ int CNetworkStringTable::AddString( bool bIsServer, const char *string, int leng
 		{
 			DataChanged( i, item );
 		}
+
+#if defined( SOURCE_RUST_ENGINE )
+		if ( bRustUpserted && rustUpsert.index != static_cast<uint32_t>( i ) )
+		{
+			Warning( "Rust string table index mismatch for %s:%s (%u != %i)\n",
+				GetTableName(), string, rustUpsert.index, i );
+			m_RustTableId = 0;
+		}
+#endif
 	}
 
 	return i;
@@ -996,7 +1120,44 @@ void CNetworkStringTable::SetStringUserData( int stringNumber, int length /*=0*/
 	CNetworkStringTableItem *p = &dict->Element( stringNumber );
 	Assert( p );
 
-	if ( p->SetUserData( m_nTickCount, length, userdata ) )
+#if defined( SOURCE_RUST_ENGINE )
+	bool bRustChangeValid = false;
+	SourceAbiStringTableChange rustChange;
+	if ( saveStringNumber >= 0 && m_RustTableId != 0 )
+	{
+		const SourceAbiStatus status = source_rust_bridge_string_table_set_user_data(
+			m_RustTableId, static_cast<uint32_t>( saveStringNumber ), userdata,
+			static_cast<uint64_t>( length ), &rustChange );
+		if ( status == SOURCE_ABI_OK )
+		{
+			bRustChangeValid = true;
+		}
+		else if ( status == SOURCE_ABI_BUFFER_TOO_SMALL ||
+			status == SOURCE_ABI_INVALID_ARGUMENT || status == SOURCE_ABI_FORMAT_ERROR )
+		{
+			return;
+		}
+		else
+		{
+			m_RustTableId = 0;
+		}
+	}
+#endif
+
+	const bool bNativeChanged = p->SetUserData( m_nTickCount, length, userdata );
+#if defined( SOURCE_RUST_ENGINE )
+	if ( bRustChangeValid && ( rustChange.changed != 0 ) != bNativeChanged )
+	{
+		Warning( "Rust string table change mismatch for %s:%i\n",
+			GetTableName(), saveStringNumber );
+		m_RustTableId = 0;
+		bRustChangeValid = false;
+	}
+	const bool bChanged = bRustChangeValid ? rustChange.changed != 0 : bNativeChanged;
+#else
+	const bool bChanged = bNativeChanged;
+#endif
+	if ( bChanged )
 	{
 		// Mark changed
 		DataChanged( saveStringNumber, p );
@@ -1036,6 +1197,59 @@ void CNetworkStringTable::DataChanged( int stringNumber, CNetworkStringTableItem
 void CNetworkStringTable::WriteStringTable( bf_write& buf )
 {
 	int numstrings = m_pItems->Count();
+
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust holds the canonical entries, so it encodes them too, leaving only the
+	// client-side section below to the native writer.
+	if ( s_bRustStringTableEncodeAvailable && m_RustTableId != 0 )
+	{
+		// The Rust entries mirror m_pItems, so a count mismatch means they
+		// diverged and the Rust bytes would not describe this table.
+		uint32_t rustEntryCount = 0;
+		SourceAbiStatus status = source_rust_bridge_string_table_entry_count(
+			m_RustTableId, &rustEntryCount );
+		if ( status == SOURCE_ABI_OK &&
+			static_cast<int>( rustEntryCount ) != numstrings )
+		{
+			status = SOURCE_ABI_FORMAT_ERROR;
+		}
+
+		CUtlVector<uint8> entryBytes;
+		uint32_t entryBits = 0;
+		if ( status == SOURCE_ABI_OK )
+		{
+			entryBytes.SetCount( 1 );
+			status = source_rust_bridge_string_table_encode_entries( m_RustTableId,
+				entryBytes.Base(), static_cast<uint64_t>( entryBytes.Count() ),
+				&entryBits );
+			if ( status == SOURCE_ABI_BUFFER_TOO_SMALL )
+			{
+				entryBytes.SetCount( static_cast<int>( ( entryBits + 7 ) / 8 ) );
+				status = source_rust_bridge_string_table_encode_entries( m_RustTableId,
+					entryBytes.Base(), static_cast<uint64_t>( entryBytes.Count() ),
+					&entryBits );
+			}
+		}
+
+		if ( status == SOURCE_ABI_OK && entryBits > 0 )
+		{
+			buf.WriteBits( entryBytes.Base(), static_cast<int>( entryBits ) );
+			if ( !s_bRustStringTableEncodeMarkerPrinted )
+			{
+				ConMsg( "Rust string table encoding active: %s, %d entries, %u bits\n",
+					GetTableName(), numstrings, entryBits );
+				s_bRustStringTableEncodeMarkerPrinted = true;
+			}
+			WriteClientSideStringTable( buf );
+			return;
+		}
+
+		s_bRustStringTableEncodeAvailable = false;
+		ConMsg( "Rust string table encoding disabled: %s, status %d, %u entries against %d\n",
+			GetTableName(), status, rustEntryCount, numstrings );
+	}
+#endif
+
 	buf.WriteWord( numstrings );
 	for ( int i = 0 ; i < numstrings; i++ )
 	{
@@ -1053,6 +1267,13 @@ void CNetworkStringTable::WriteStringTable( bf_write& buf )
 			buf.WriteOneBit( 0 );
 		}
 	}
+
+	WriteClientSideStringTable( buf );
+}
+
+void CNetworkStringTable::WriteClientSideStringTable( bf_write& buf )
+{
+	int numstrings;
 
 	if ( m_pItemsClientSide )
 	{
@@ -1186,6 +1407,17 @@ const void *CNetworkStringTable::GetStringUserData( int stringNumber, int *lengt
 //-----------------------------------------------------------------------------
 int CNetworkStringTable::GetNumStrings( void ) const
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 )
+	{
+		uint32_t entryCount = 0;
+		if ( source_rust_bridge_string_table_entry_count( m_RustTableId,
+			&entryCount ) == SOURCE_ABI_OK )
+		{
+			return static_cast<int>( entryCount );
+		}
+	}
+#endif
 	return m_pItems->Count();
 }
 
@@ -1199,6 +1431,19 @@ int CNetworkStringTable::FindStringIndex( char const *string )
 {
 	if ( !string )
 		return INVALID_STRING_INDEX;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_RustTableId != 0 )
+	{
+		uint32_t index = 0;
+		const SourceAbiStatus status = source_rust_bridge_string_table_find(
+			m_RustTableId, string, strlen( string ), &index );
+		if ( status == SOURCE_ABI_OK )
+			return static_cast<int>( index );
+		if ( status == SOURCE_ABI_NOT_FOUND )
+			return INVALID_STRING_INDEX;
+		m_RustTableId = 0;
+	}
+#endif
 	int i = m_pItems->Find( string );
 	if ( m_pItems->IsValidIndex( i ) )
 		return i;

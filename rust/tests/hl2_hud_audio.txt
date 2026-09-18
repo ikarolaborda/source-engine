@@ -1,0 +1,63 @@
+// HUD and audio behavior scenario used by run_rust_hl2_smoke.sh.
+//
+// The intro-lipsync gate proves one scene's phonemes reach flex output. This
+// one covers the rest of the presentation surface that a player actually sees
+// and hears: the health, ammo and suit-power HUD elements tracking live game
+// state, and the mixer starting real gameplay sounds. Both sides report
+// through cheat-gated diagnostics rather than screenshots, so the gate is
+// deterministic.
+//
+// Runs with audio enabled, unlike the unattended smoke and endurance paths.
+//
+// The wait has to outlast map load, because the script starts running before
+// the player entity exists and every command below needs one.
+Test_Wait 25
+sv_cheats 1
+cl_hud_validate 1
+snd_validate 1
+echo RUST_HUD_AUDIO_STARTED
+// d1_trainstation_01 opens with a scripted train ride that holds the player
+// in a pod without a suit, so the suit-power element never renders there.
+changelevel d1_trainstation_02
+Test_Wait 25
+echo RUST_HUD_AUDIO_BASELINE
+soundinfo
+// A level change restarts the server, which can revert cheat-gated cvars.
+// Print them back so a missing diagnostic is distinguishable from silence.
+sv_cheats
+cl_hud_validate
+snd_validate
+// Equipping the suit brings up the aux-power element; the SMG brings up ammo.
+impulse 101
+Test_Wait 2
+give weapon_smg1
+Test_Wait 1
+use weapon_smg1
+Test_Wait 2
+echo RUST_HUD_AUDIO_ARMED
+// Firing spends clip ammo, so the ammo element has to report a lower count,
+// and every shot has to reach the mixer.
++attack
+Test_Wait 2
+-attack
+Test_Wait 1
+echo RUST_HUD_AUDIO_FIRED
+// Sprinting drains suit power, which the aux-power element tracks.
++speed
++forward
+Test_Wait 3
+-forward
+-speed
+echo RUST_HUD_AUDIO_SPRINTED
+// Damage has to move the health element. The opening chapter holds the
+// gordon_invulnerable global on, which is authentic content behavior, so clear
+// it before asking for damage.
+global_set gordon_invulnerable 0
+Test_Wait 1
+hurtme 25
+Test_Wait 2
+echo RUST_HUD_AUDIO_HURT
+soundinfo
+Test_Wait 2
+echo RUST_HUD_AUDIO_COMPLETED
+quit

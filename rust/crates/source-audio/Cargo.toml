@@ -1,0 +1,12 @@
+[package]
+name = "source-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+source-binary = { path = "../source-binary" }
+
+[lints]
+workspace = true

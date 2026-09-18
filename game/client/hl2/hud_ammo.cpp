@@ -298,6 +298,13 @@ void CHudAmmo::SetAmmo(int ammo, bool playAnimation)
 	}
 
 	SetDisplayValue(ammo);
+
+	if ( HudValidateEnabled() )
+	{
+		C_BaseCombatWeapon *pWeapon = GetActiveWeapon();
+		HudValidateReport( "RUST_HUD_AMMO weapon=%s clip=%d",
+			pWeapon ? pWeapon->GetName() : "none", ammo );
+	}
 }
 
 //-----------------------------------------------------------------------------
