@@ -32,6 +32,13 @@ pub const LUMP_LIGHTING: usize = 8;
 /// The same, as compiled for high dynamic range. A map built for it carries
 /// both lumps, and this one is what it was authored against.
 pub const LUMP_LIGHTING_HDR: usize = 53;
+/// Which of the ambient samples below belong to each leaf.
+pub const LUMP_LEAF_AMBIENT_INDEX: usize = 52;
+pub const LUMP_LEAF_AMBIENT_INDEX_HDR: usize = 51;
+/// The light arriving at points inside the map's open leaves, from every
+/// direction, which is how anything that is not a world surface is lit.
+pub const LUMP_LEAF_AMBIENT_LIGHTING: usize = 56;
+pub const LUMP_LEAF_AMBIENT_LIGHTING_HDR: usize = 55;
 
 const PLANE_SIZE: usize = 20;
 const NODE_SIZE: usize = 32;
@@ -153,6 +160,18 @@ pub enum Error {
     InvalidGameLumpRange {
         offset: usize,
         length: usize,
+    },
+    /// A lump's records do not divide the bytes it holds, so the stride
+    /// being read is wrong.
+    InvalidLumpLength {
+        lump: usize,
+        length: usize,
+    },
+    /// A leaf points at ambient samples the lump does not hold.
+    InvalidAmbientRange {
+        first: usize,
+        count: usize,
+        samples: usize,
     },
     /// The static prop records do not divide the bytes the lump holds for
     /// them, so the stride its version implies is wrong.
@@ -292,6 +311,18 @@ impl fmt::Display for Error {
             Self::InvalidGameLumpRange { offset, length } => write!(
                 f,
                 "game lump at {offset} for {length} bytes runs past the map"
+            ),
+            Self::InvalidLumpLength { lump, length } => write!(
+                f,
+                "lump {lump} holds {length} bytes, which its records do not divide"
+            ),
+            Self::InvalidAmbientRange {
+                first,
+                count,
+                samples,
+            } => write!(
+                f,
+                "a leaf claims {count} ambient samples from {first}, past the {samples} stored"
             ),
             Self::InvalidStaticPropStride {
                 version,
@@ -1276,25 +1307,31 @@ impl Placement {
 
     /// Put a point stored in the model into the world.
     pub fn apply(&self, point: [f32; 3]) -> [f32; 3] {
-        let [pitch, yaw, roll] = self.angles;
-        let rotated = if pitch == 0.0 && yaw == 0.0 && roll == 0.0 {
-            point
-        } else {
-            // Yaw about Z, then pitch about Y, then roll about X, which is
-            // how the engine reads the three numbers a map writes.
-            let (sy, cy) = yaw.to_radians().sin_cos();
-            let (sp, cp) = pitch.to_radians().sin_cos();
-            let (sr, cr) = roll.to_radians().sin_cos();
-            let rows = [
-                [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
-                [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
-                [-sp, sr * cp, cr * cp],
-            ];
-            std::array::from_fn(|axis| {
-                rows[axis][0] * point[0] + rows[axis][1] * point[1] + rows[axis][2] * point[2]
-            })
-        };
+        let rotated = self.rotate(point);
         std::array::from_fn(|axis| rotated[axis] + self.origin[axis])
+    }
+
+    /// Turn a direction the way this placement turns the thing it places,
+    /// without moving it, which is what a normal needs: a normal says which
+    /// way a surface faces and has no position to move.
+    pub fn rotate(&self, vector: [f32; 3]) -> [f32; 3] {
+        let [pitch, yaw, roll] = self.angles;
+        if pitch == 0.0 && yaw == 0.0 && roll == 0.0 {
+            return vector;
+        }
+        // Yaw about Z, then pitch about Y, then roll about X, which is
+        // how the engine reads the three numbers a map writes.
+        let (sy, cy) = yaw.to_radians().sin_cos();
+        let (sp, cp) = pitch.to_radians().sin_cos();
+        let (sr, cr) = roll.to_radians().sin_cos();
+        let rows = [
+            [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+            [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
+            [-sp, sr * cp, cr * cp],
+        ];
+        std::array::from_fn(|axis| {
+            rows[axis][0] * vector[0] + rows[axis][1] * vector[1] + rows[axis][2] * vector[2]
+        })
     }
 }
 
@@ -2150,6 +2187,281 @@ pub struct StaticProp {
 const GAME_LUMP_STATIC_PROPS: i32 = i32::from_be_bytes(*b"sprp");
 const GAME_LUMP_ENTRY_SIZE: usize = 16;
 /// Bytes one model name takes in the dictionary.
+/// The light arriving at a point from each of the six axial directions.
+///
+/// This is how Source lights everything that is not a world surface. A
+/// world surface has a lightmap because the compiler knew where it was and
+/// which way it faced; a prop, a player or a thrown crate does not, so the
+/// compiler instead records what arrives at points inside each open leaf
+/// and leaves the shading to be worked out from whichever way a surface
+/// turns out to face.
+///
+/// The order is the one the compiler writes: `+x, -x, +y, -y, +z, -z`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LightCube {
+    pub faces: [[f32; 3]; 6],
+}
+
+impl LightCube {
+    /// The light arriving on a surface facing `normal`.
+    ///
+    /// A normal faces at most three of the six directions, and the square
+    /// of each component is how much of it each contributes, which sums to
+    /// one for a unit normal and so neither brightens nor darkens a
+    /// surface for being turned at an angle.
+    pub fn shade(&self, normal: [f32; 3]) -> [f32; 3] {
+        let mut out = [0.0f32; 3];
+        for (axis, component) in normal.iter().enumerate() {
+            let face = self.faces[axis * 2 + usize::from(*component < 0.0)];
+            let weight = component * component;
+            for (channel, value) in out.iter_mut().enumerate() {
+                *value += weight * face[channel];
+            }
+        }
+        out
+    }
+
+    /// The brightest any direction is, which is what says whether a point
+    /// is lit at all.
+    pub fn peak(&self) -> f32 {
+        self.faces
+            .iter()
+            .flat_map(|face| face.iter())
+            .fold(0.0f32, |peak, value| peak.max(*value))
+    }
+}
+
+/// One of the compiler's measurements of the light inside a leaf.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AmbientSample {
+    pub cube: LightCube,
+    /// Where in the leaf it was taken, as a fraction of the leaf's box on
+    /// each axis. The compiler stores this as a byte per axis, which is
+    /// enough because it is only ever used to weigh one sample against
+    /// another.
+    pub fraction: [f32; 3],
+}
+
+/// The light inside the map's open leaves, which is what lights everything
+/// the compiler could not bake a lightmap for.
+#[derive(Debug, Clone, Default)]
+pub struct AmbientLighting {
+    samples: Vec<AmbientSample>,
+    /// Per leaf, where its samples start and how many it has.
+    index: Vec<(usize, usize)>,
+    hdr: bool,
+}
+
+const AMBIENT_SAMPLE_SIZE: usize = 28;
+const AMBIENT_INDEX_SIZE: usize = 4;
+
+impl AmbientLighting {
+    /// Reads the high-range lumps where the map carries them, as the engine
+    /// does for a map built against them, and the standard ones otherwise.
+    ///
+    /// Falls back to the leaf lump itself, because a map compiled before
+    /// the ambient lumps existed carries one cube inside each leaf record
+    /// instead, which is what Half-Life 2's own maps do: their version-0
+    /// leaves are the version-1 ones with a cube and two bytes of padding
+    /// on the end. Reading only the separate lumps would light every prop
+    /// in the shipped campaign black.
+    pub fn parse(bsp: &Bsp<'_>) -> Result<Self> {
+        for (hdr, lighting, index) in [
+            (
+                true,
+                LUMP_LEAF_AMBIENT_LIGHTING_HDR,
+                LUMP_LEAF_AMBIENT_INDEX_HDR,
+            ),
+            (false, LUMP_LEAF_AMBIENT_LIGHTING, LUMP_LEAF_AMBIENT_INDEX),
+        ] {
+            let lighting = bsp.lump(lighting).unwrap_or(&[]);
+            let index = bsp.lump(index).unwrap_or(&[]);
+            if lighting.is_empty() || index.is_empty() {
+                continue;
+            }
+            return Self::from_lumps(lighting, index, hdr);
+        }
+        if bsp.header.lumps[LUMP_LEAVES].version == 0 {
+            return Self::from_leaves(bsp.lump(LUMP_LEAVES).unwrap_or(&[]));
+        }
+        Ok(Self::default())
+    }
+
+    /// One sample per leaf, taken from the cube each version-0 leaf record
+    /// carries, placed at the middle of the leaf because that record says
+    /// nothing about where in the leaf it was measured.
+    fn from_leaves(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() % LEAF_V0_SIZE != 0 {
+            return Err(Error::InvalidLumpLength {
+                lump: LUMP_LEAVES,
+                length: bytes.len(),
+            });
+        }
+        let mut samples = Vec::with_capacity(bytes.len() / LEAF_V0_SIZE);
+        let mut index = Vec::with_capacity(bytes.len() / LEAF_V0_SIZE);
+        for (leaf, record) in bytes.chunks_exact(LEAF_V0_SIZE).enumerate() {
+            // The cube sits after the thirty bytes a version-1 leaf is,
+            // and before the two of padding that end the record.
+            let cube = &record[30..54];
+            let mut faces = [[0.0f32; 3]; 6];
+            for (face, stored) in faces.iter_mut().zip(cube.chunks_exact(4)) {
+                *face = decode_light(stored);
+            }
+            index.push((leaf, 1));
+            samples.push(AmbientSample {
+                cube: LightCube { faces },
+                fraction: [0.5; 3],
+            });
+        }
+        Ok(Self {
+            samples,
+            index,
+            hdr: false,
+        })
+    }
+
+    fn from_lumps(lighting: &[u8], index: &[u8], hdr: bool) -> Result<Self> {
+        if lighting.len() % AMBIENT_SAMPLE_SIZE != 0 {
+            return Err(Error::InvalidLumpLength {
+                lump: LUMP_LEAF_AMBIENT_LIGHTING,
+                length: lighting.len(),
+            });
+        }
+        if index.len() % AMBIENT_INDEX_SIZE != 0 {
+            return Err(Error::InvalidLumpLength {
+                lump: LUMP_LEAF_AMBIENT_INDEX,
+                length: index.len(),
+            });
+        }
+
+        let mut samples = Vec::with_capacity(lighting.len() / AMBIENT_SAMPLE_SIZE);
+        for record in lighting.chunks_exact(AMBIENT_SAMPLE_SIZE) {
+            let mut faces = [[0.0f32; 3]; 6];
+            for (face, stored) in faces.iter_mut().zip(record.chunks_exact(4)) {
+                *face = decode_light(stored);
+            }
+            samples.push(AmbientSample {
+                cube: LightCube { faces },
+                fraction: std::array::from_fn(|axis| f32::from(record[24 + axis]) / 255.0),
+            });
+        }
+
+        let mut entries = Vec::with_capacity(index.len() / AMBIENT_INDEX_SIZE);
+        for record in index.chunks_exact(AMBIENT_INDEX_SIZE) {
+            let count = usize::from(u16::from_le_bytes([record[0], record[1]]));
+            let first = usize::from(u16::from_le_bytes([record[2], record[3]]));
+            // A leaf pointing past the samples would silently light
+            // everything in it black, so it is refused rather than
+            // clamped.
+            if first + count > samples.len() {
+                return Err(Error::InvalidAmbientRange {
+                    first,
+                    count,
+                    samples: samples.len(),
+                });
+            }
+            entries.push((first, count));
+        }
+
+        Ok(Self {
+            samples,
+            index: entries,
+            hdr,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Whether this came from the high-range lumps.
+    pub fn is_hdr(&self) -> bool {
+        self.hdr
+    }
+
+    pub fn samples_in(&self, leaf: usize) -> &[AmbientSample] {
+        match self.index.get(leaf) {
+            Some(&(first, count)) => &self.samples[first..first + count],
+            None => &[],
+        }
+    }
+
+    /// The light at a point, weighed across the samples of the leaf it is
+    /// in.
+    ///
+    /// Weighing by distance rather than taking the nearest sample, because
+    /// a leaf spanning a doorway is measured on both sides of it and a prop
+    /// standing in the doorway should not flip from one to the other as it
+    /// is nudged. Returns `None` where the point is in solid or in a leaf
+    /// the compiler measured nothing in, which is the caller's cue to fall
+    /// back rather than to draw black.
+    pub fn at(&self, world: &World, point: [f32; 3]) -> Option<LightCube> {
+        let leaf_index = world.point_leaf(point).ok()?;
+        let leaf = world.leaves().get(leaf_index)?;
+        let samples = self.samples_in(leaf_index);
+        match samples {
+            [] => None,
+            [only] => Some(only.cube),
+            _ => {
+                let size: [f32; 3] = std::array::from_fn(|axis| {
+                    (f32::from(leaf.maxs[axis]) - f32::from(leaf.mins[axis])).max(1.0)
+                });
+                let mut total = 0.0f32;
+                let mut cube = LightCube::default();
+                for sample in samples {
+                    let mut distance = 0.0f32;
+                    for axis in 0..3 {
+                        let at = f32::from(leaf.mins[axis]) + sample.fraction[axis] * size[axis];
+                        distance += (point[axis] - at) * (point[axis] - at);
+                    }
+                    // A small floor so a point sitting exactly on a sample
+                    // does not divide by zero.
+                    let weight = 1.0 / distance.max(1.0);
+                    total += weight;
+                    for (face, from) in cube.faces.iter_mut().zip(&sample.cube.faces) {
+                        for (channel, value) in face.iter_mut().enumerate() {
+                            *value += weight * from[channel];
+                        }
+                    }
+                }
+                for face in &mut cube.faces {
+                    for value in face {
+                        *value /= total;
+                    }
+                }
+                Some(cube)
+            }
+        }
+    }
+}
+
+/// One stored colour and its shared exponent, as the linear light it means.
+///
+/// The same three bytes and shared exponent the lightmap samples use, but
+/// left linear rather than written into the screen's gamma, because this is
+/// shaded against a surface's normal first and only what comes out of that
+/// is displayed. See [`encode_for_display`].
+fn decode_light(stored: &[u8]) -> [f32; 3] {
+    let scale = f32::from(stored[3] as i8).exp2();
+    std::array::from_fn(|channel| f32::from(stored[channel]) * scale)
+}
+
+/// Linear light as the value that multiplies a material to draw it, which
+/// is the same overbright and gamma the lightmap samples are stored
+/// against so that a prop and the floor it stands on agree.
+pub fn encode_for_display(linear: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|channel| {
+        linear[channel]
+            .clamp(0.0, LIGHTMAP_OVERBRIGHT)
+            .powf(1.0 / LIGHTMAP_GAMMA)
+            / LIGHTMAP_OVERBRIGHT
+    })
+}
+
 const STATIC_PROP_NAME_SIZE: usize = 128;
 /// The prop record's stride by lump version. Later versions append fields
 /// rather than rearranging them, so the leading ones this reads are the

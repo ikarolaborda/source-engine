@@ -336,6 +336,29 @@ geometry heaped around the player's feet would draw, and the best draws
 8,852 distinct shades, where a handful would be the flat fill a lost
 coordinate buffer leaves.
 
+Those props are lit by the map. A world surface has a lightmap because the
+compiler knew where it was and which way it faced; a prop does not, so the
+compiler records the light arriving from each of six axial directions at
+points inside every open leaf instead, and a surface takes whichever of
+those it faces, weighted by the square of each component of its normal so
+that turning a surface neither brightens nor darkens it. Half-Life 2's own
+maps keep that cube inside each leaf record rather than in the lumps a
+later compiler writes it to, so reading only those lumps finds them empty
+and lights every prop in the shipped campaign black; both are read, the
+later lumps preferred where a map has them.
+
+There is no picture to look at that would show this being read wrong, since
+a cube whose faces are in the wrong order or whose shared exponent is
+applied wrongly still shades a prop to some plausible grey. It is held to
+what must be true of light in a room whatever the room is: of
+`d1_trainstation_01`'s 5,353 leaves, 5,283 carry a measurement, 3,989 of
+the 5,242 that differ top to bottom are brighter above than below, and the
+peaks run from 8.4e-9 through a median of 6.8e-3 to 1.23, a spread of eight
+orders of magnitude that a constant does not produce. This is the ambient
+term only: Half-Life 2 shipped before the compiler baked per-prop vertex
+lighting, so the engine adds the map's direct lights to this cube at
+runtime, which is not done here and leaves props dimmer than the world.
+
 Run the installed-content gate without copying Steam assets into the
 repository:
 

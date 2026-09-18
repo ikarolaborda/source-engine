@@ -154,6 +154,7 @@ impl<'a> TriangleList<'a> {
             coordinates: None,
             lightmap: None,
             lightmap_coordinates: None,
+            shade: None,
             indices: None,
             uniforms: None,
         }
@@ -179,6 +180,18 @@ impl<'a> TriangleList<'a> {
     pub fn with_lightmap(mut self, lightmap: &'a Texture, at: VertexAttribute<'a>) -> Self {
         self.lightmap = Some(lightmap);
         self.lightmap_coordinates = Some(at);
+        self
+    }
+
+    /// A colour per vertex, which the fragment stage modulates the
+    /// material by.
+    ///
+    /// This is how Source lights what a lightmap cannot: a prop, a player
+    /// or anything else the compiler did not know the position of when it
+    /// baked the map, whose light is worked out per vertex from the
+    /// ambient cube of the leaf it stands in.
+    pub fn with_shade(mut self, shade: VertexAttribute<'a>) -> Self {
+        self.shade = Some(shade);
         self
     }
 
@@ -216,6 +229,9 @@ pub struct TriangleList<'a> {
     /// the material's because the two are projected onto a surface at
     /// different scales: one lightmap sample covers many texels.
     pub lightmap_coordinates: Option<VertexAttribute<'a>>,
+    /// A colour per vertex the fragment stage modulates by. See
+    /// [`TriangleList::with_shade`].
+    pub shade: Option<VertexAttribute<'a>>,
     pub indices: Option<Indices<'a>>,
     /// Constants every vertex reads, such as the world-to-clip transform.
     /// They are passed inline because Metal's small-payload path exists for
@@ -236,6 +252,10 @@ pub const COORDINATE_BUFFER_INDEX: u64 = 2;
 /// The vertex buffer index a draw's lightmap coordinates are bound at.
 #[cfg(target_os = "macos")]
 pub const LIGHTMAP_COORDINATE_BUFFER_INDEX: u64 = 3;
+
+/// The vertex buffer index a draw's per-vertex colours are bound at.
+#[cfg(target_os = "macos")]
+pub const SHADE_BUFFER_INDEX: u64 = 4;
 
 /// The fragment texture index the material's own texture is bound at, which
 /// the shader declares as `texture(0)`.
@@ -580,6 +600,9 @@ pub struct TriangleList<'a> {
     pub coordinates: Option<VertexAttribute<'a>>,
     pub lightmap: Option<&'a Texture>,
     pub lightmap_coordinates: Option<VertexAttribute<'a>>,
+    /// A colour per vertex the fragment stage modulates by. See
+    /// [`TriangleList::with_shade`].
+    pub shade: Option<VertexAttribute<'a>>,
     pub indices: Option<Indices<'a>>,
     pub uniforms: Option<&'a [u8]>,
 }
@@ -592,6 +615,9 @@ pub const COORDINATE_BUFFER_INDEX: u64 = 2;
 
 #[cfg(not(target_os = "macos"))]
 pub const LIGHTMAP_COORDINATE_BUFFER_INDEX: u64 = 3;
+
+#[cfg(not(target_os = "macos"))]
+pub const SHADE_BUFFER_INDEX: u64 = 4;
 
 #[cfg(not(target_os = "macos"))]
 pub const TEXTURE_INDEX: u64 = 0;

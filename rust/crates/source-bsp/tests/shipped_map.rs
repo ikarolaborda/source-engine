@@ -460,3 +460,105 @@ fn places_brush_models_where_their_entities_stand() {
         stored.runs.len(),
     );
 }
+
+/// The light the compiler measured inside a shipped map's leaves.
+///
+/// This is what lights everything that is not a world surface, and unlike
+/// a lightmap there is no picture to look at that would show it being read
+/// wrong: a cube whose faces are in the wrong order, or whose shared
+/// exponent is applied wrongly, still yields numbers that shade a prop to
+/// some plausible grey. So it is checked against what light in a room must
+/// be true of regardless of the room: that it comes from above, that it
+/// varies from place to place, and that the brightest places are the ones
+/// open to the sky.
+#[test]
+fn reads_the_light_inside_a_shipped_map_s_rooms() {
+    let Some(path) = find_map() else {
+        eprintln!("skipped: no installed Half-Life 2 content to read a map from");
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("a shipped map reads");
+    let bsp = source_bsp::Bsp::parse(&bytes).expect("a shipped map parses");
+    let world = source_bsp::World::parse(&bsp).expect("a shipped map's tree parses");
+    let ambient =
+        source_bsp::AmbientLighting::parse(&bsp).expect("a shipped map's ambient light parses");
+
+    assert!(
+        !ambient.is_empty(),
+        "a compiled campaign map measures the light in its own rooms"
+    );
+
+    let mut measured = 0usize;
+    let mut from_above = 0usize;
+    let mut compared = 0usize;
+    let mut peaks: Vec<f32> = Vec::new();
+    for (index, leaf) in world.leaves().iter().enumerate() {
+        for sample in ambient.samples_in(index) {
+            let peak = sample.cube.peak();
+            if peak == 0.0 {
+                continue;
+            }
+            measured += 1;
+            peaks.push(peak);
+
+            // A room is lit from its lamps and its sky, both of which are
+            // above it. Reading the six faces in the wrong order puts that
+            // light on a side or underneath.
+            let up: f32 = sample.cube.faces[4].iter().sum();
+            let down: f32 = sample.cube.faces[5].iter().sum();
+            if up != down {
+                compared += 1;
+                from_above += usize::from(up > down);
+            }
+
+            // Every channel of every face has to be a light level rather
+            // than the very large or very small number a mishandled shared
+            // exponent produces.
+            for face in &sample.cube.faces {
+                for channel in face {
+                    assert!(
+                        channel.is_finite() && *channel >= 0.0 && *channel < 1000.0,
+                        "leaf {index} is lit to {channel} from one direction"
+                    );
+                }
+            }
+        }
+        let _ = leaf;
+    }
+
+    assert!(
+        measured > 1000,
+        "the map measures the light through its rooms, got {measured} samples"
+    );
+    assert!(
+        from_above * 4 > compared * 3,
+        "light in a room comes from above it, which held in {from_above} of {compared}"
+    );
+
+    // A constant would pass everything above. Light varies by orders of
+    // magnitude between a lit platform and a closed room, so the spread is
+    // what says these are measurements rather than one number repeated.
+    peaks.sort_by(f32::total_cmp);
+    let median = peaks[peaks.len() / 2];
+    let brightest = peaks[peaks.len() - 1];
+    let dimmest = peaks[0];
+    assert!(
+        brightest > median * 4.0,
+        "the map's brightest room is brighter than its middling one, {brightest} against {median}"
+    );
+    assert!(
+        dimmest * 4.0 < median,
+        "the map's dimmest room is dimmer than its middling one, {dimmest} against {median}"
+    );
+
+    eprintln!(
+        "{measured} lit samples over {} leaves, lit from above in {from_above} of {compared}, \
+         peaks from {dimmest:e} through {median:e} to {brightest:e}{}",
+        world.leaves().len(),
+        if ambient.is_hdr() {
+            ", from the high-range lumps"
+        } else {
+            ""
+        }
+    );
+}

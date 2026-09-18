@@ -203,6 +203,40 @@ parity.
    geometry heaped around the player's feet, and a view of two or three
    shades would be a lost coordinate buffer drawing flat fills, which is
    how the buffer indices being swapped was caught.
+   Those props are lit by the map rather than drawn fullbright. A world
+   surface has a lightmap because the compiler knew where it was and which
+   way it faced; a prop does not, so the compiler instead records the light
+   arriving from each of six axial directions at points inside every open
+   leaf, and a surface is shaded by whichever of those it faces, weighted
+   by the square of each component of its normal so that turning a surface
+   neither brightens nor darkens it. Half-Life 2's own maps keep that cube
+   inside each leaf record rather than in the lumps a later compiler
+   writes it to, which is the part that would have gone unnoticed: reading
+   only the separate lumps finds them empty and lights every prop in the
+   shipped campaign black. Both are read, the later lumps preferred where
+   a map has them and the high-range pair preferred over the standard one.
+   A draw now takes a colour per vertex for this, which is a capability
+   the engine needs beyond props, since it is also how a player, a thrown
+   crate and any `$vertexcolor` material are lit.
+   Reading this wrong does not produce a picture to look at: a cube whose
+   faces are in the wrong order, or whose shared exponent is applied
+   wrongly, still shades a prop to some plausible grey. So it is checked
+   against what must be true of light in a room whatever the room is.
+   Across `d1_trainstation_01`'s 5,353 leaves, 5,283 carry a measurement;
+   3,989 of the 5,242 that differ top to bottom are brighter above than
+   below, which is where lamps and sky are; and the peaks run from 8.4e-9
+   through a median of 6.8e-3 to 1.23, a spread of eight orders of
+   magnitude that a constant or a mishandled exponent does not produce.
+   That the lighting is what changes the picture is established the same
+   way the world's was, by drawing each view twice through pipelines that
+   differ only in whether they modulate by it: all 51,828 prop pixels
+   across four views change and all of them darken.
+   This is the ambient term only. Half-Life 2 shipped before the compiler
+   baked per-prop vertex lighting, and `d1_trainstation_01`'s archive
+   holds none, so the engine adds the map's direct lights to this cube at
+   runtime. Until that is done the props are lit but dimmer than the world
+   they stand in, which is visible and expected rather than a defect in
+   what is read.
    Choosing where to look from turned out to matter as much as what to draw.
    A grid over the map's bounds lands mostly in the void around it and in
    the slivers the compiler leaves inside its walls, which are empty by its

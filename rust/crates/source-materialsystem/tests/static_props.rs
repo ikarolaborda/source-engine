@@ -17,7 +17,7 @@
 //!
 //! Shipped content is not redistributable, so this reports that it was
 //! skipped when no installation is present.
-use source_bsp::{Bsp, StaticProps};
+use source_bsp::{AmbientLighting, Bsp, StaticProps, World};
 use source_filesystem::{Position, SearchPaths};
 use source_materialsystem::MaterialSystem;
 use source_render::{
@@ -34,20 +34,32 @@ const PROP_SHADER: &str = "
     struct Surface {
         float4 position [[position]];
         float2 texcoord;
+        float3 shade;
     };
 
     vertex Surface prop_vertex(const device packed_float3 *positions [[buffer(0)]],
                                const device packed_float2 *texcoords [[buffer(2)]],
+                               const device packed_float3 *shades [[buffer(4)]],
                                constant float4x4 &view_projection [[buffer(1)]],
                                uint index [[vertex_id]]) {
         Surface out;
         out.position = view_projection * float4(positions[index], 1.0);
         out.texcoord = texcoords[index];
+        out.shade = shades[index];
         return out;
     }
 
     fragment float4 prop_fragment(Surface in [[stage_in]],
                                   texture2d<float> base [[texture(0)]]) {
+        constexpr sampler tiling(address::repeat, filter::linear, mip_filter::linear);
+        // Multiplied back by the overbright the shade was divided by
+        // when it was encoded, the same as the world's lightmap path, so
+        // that a prop and the floor it stands on are lit alike.
+        return float4(base.sample(tiling, in.texcoord).rgb * in.shade * 2.0, 1.0);
+    }
+
+    fragment float4 unlit_fragment(Surface in [[stage_in]],
+                                   texture2d<float> base [[texture(0)]]) {
         constexpr sampler tiling(address::repeat, filter::linear, mip_filter::linear);
         return float4(base.sample(tiling, in.texcoord).rgb, 1.0);
     }
@@ -62,6 +74,7 @@ fn content_root() -> Option<std::path::PathBuf> {
 /// One model's geometry, in the model's own space, ready to be placed.
 struct Model {
     positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
     texcoords: Vec<[f32; 2]>,
     /// One run of indices per material the model draws with.
     runs: Vec<(String, Vec<u32>)>,
@@ -106,6 +119,7 @@ fn load_model(paths: &SearchPaths, name: &str) -> Option<Model> {
 
     Some(Model {
         positions: vertices.iter().map(|vertex| vertex.position).collect(),
+        normals: vertices.iter().map(|vertex| vertex.normal).collect(),
         texcoords: vertices.iter().map(|vertex| vertex.texcoord).collect(),
         runs,
     })
@@ -157,11 +171,20 @@ fn draws_the_static_props_a_shipped_map_places() {
 
     // Every prop's geometry, transformed out of the model's own space into
     // the map's, in one buffer with one run per material.
+    let world = World::parse(&bsp).expect("the map's tree parses");
+    let ambient = AmbientLighting::parse(&bsp).expect("the map's ambient lighting parses");
+    assert!(
+        !ambient.is_empty(),
+        "a compiled campaign map measures the light in its own leaves"
+    );
+
     let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut shades: Vec<[f32; 3]> = Vec::new();
     let mut texcoords: Vec<[f32; 2]> = Vec::new();
     let mut runs: Vec<(String, Vec<u32>)> = Vec::new();
     let mut placed = 0usize;
     let mut off_origin = 0usize;
+    let mut lit = 0usize;
     for prop in props.props() {
         let Some(model) = models.get(prop.model).and_then(Option::as_ref) else {
             continue;
@@ -169,12 +192,29 @@ fn draws_the_static_props_a_shipped_map_places() {
         let placement = StaticProps::placement(prop);
         let base = u32::try_from(positions.len()).expect("a map's props fit an index");
         let mut middle = [0.0f64; 3];
-        for (position, texcoord) in model.positions.iter().zip(&model.texcoords) {
-            let world = placement.apply(*position);
+
+        // A prop takes its light from the leaf it stands in rather than
+        // from a lightmap of its own, because the compiler baked the map
+        // before anything was standing in it. Sampling at the prop's own
+        // origin rather than per vertex is what the engine does, and is
+        // why a tall prop is lit as one thing rather than shading up its
+        // own height.
+        let cube = ambient.at(&world, prop.origin).unwrap_or_default();
+        lit += usize::from(cube.peak() > 0.0);
+
+        for ((position, normal), texcoord) in model
+            .positions
+            .iter()
+            .zip(&model.normals)
+            .zip(&model.texcoords)
+        {
+            let placed = placement.apply(*position);
             for axis in 0..3 {
-                middle[axis] += f64::from(world[axis]);
+                middle[axis] += f64::from(placed[axis]);
             }
-            positions.push(world);
+            positions.push(placed);
+            let shade = source_bsp::encode_for_display(cube.shade(placement.rotate(*normal)));
+            shades.push(shade);
             texcoords.push(*texcoord);
         }
 
@@ -231,6 +271,9 @@ fn draws_the_static_props_a_shipped_map_places() {
     let pipeline = device
         .create_depth_pipeline(&library, "prop_vertex", "prop_fragment")
         .expect("built");
+    let unlit = device
+        .create_depth_pipeline(&library, "prop_vertex", "unlit_fragment")
+        .expect("built");
 
     let mut system = MaterialSystem::new();
     let mut bound = 0usize;
@@ -254,6 +297,9 @@ fn draws_the_static_props_a_shipped_map_places() {
     let texcoord_buffer = device
         .create_buffer(as_bytes(&texcoords))
         .expect("coordinates upload");
+    let shade_buffer = device
+        .create_buffer(as_bytes(&shades))
+        .expect("shades upload");
 
     // Standing where the map starts the player and turning around, because
     // a viewpoint chosen by hand can be one with nothing in front of it.
@@ -273,6 +319,9 @@ fn draws_the_static_props_a_shipped_map_places() {
     let mut drew = 0usize;
     let mut best_shades = 0usize;
     let mut covered: Vec<f32> = Vec::new();
+    let mut compared = 0usize;
+    let mut darkened = 0usize;
+    let mut changed = 0usize;
     for yaw in [0.0, 90.0, 180.0, 270.0] {
         let eye = Eye {
             position: [start[0], start[1], start[2] + 48.0],
@@ -293,28 +342,57 @@ fn draws_the_static_props_a_shipped_map_places() {
                 .expect("indices upload");
             buffers.push((texture, buffer, indices.len()));
         }
-        let draws: Vec<TriangleList<'_>> = buffers
-            .iter()
-            .map(|(texture, buffer, count)| {
-                TriangleList::new(
-                    &pipeline,
-                    Vertices::Buffered {
-                        buffer: &position_buffer,
-                        count: positions.len(),
-                        stride: std::mem::size_of::<[f32; 3]>(),
-                    },
-                )
-                .with_texture(texture)
-                .with_coordinates(VertexAttribute::packed::<[f32; 2]>(&texcoord_buffer))
-                .with_indices(Indices {
-                    buffer,
-                    count: *count,
-                    format: IndexFormat::Uint32,
-                    first: 0,
+        fn build<'a>(
+            pipeline: &'a source_render::Pipeline,
+            buffers: &'a [(&'a source_render::Texture, source_render::Buffer, usize)],
+            positions: &'a source_render::Buffer,
+            vertex_count: usize,
+            texcoords: &'a source_render::Buffer,
+            shades: &'a source_render::Buffer,
+            transform: &'a source_render::Matrix,
+        ) -> Vec<TriangleList<'a>> {
+            buffers
+                .iter()
+                .map(|(texture, buffer, count)| {
+                    TriangleList::new(
+                        pipeline,
+                        Vertices::Buffered {
+                            buffer: positions,
+                            count: vertex_count,
+                            stride: std::mem::size_of::<[f32; 3]>(),
+                        },
+                    )
+                    .with_texture(texture)
+                    .with_coordinates(VertexAttribute::packed::<[f32; 2]>(texcoords))
+                    .with_shade(VertexAttribute::packed::<[f32; 3]>(shades))
+                    .with_indices(Indices {
+                        buffer,
+                        count: *count,
+                        format: IndexFormat::Uint32,
+                        first: 0,
+                    })
+                    .with_uniforms(transform.as_bytes())
                 })
-                .with_uniforms(transform.as_bytes())
-            })
-            .collect();
+                .collect()
+        }
+        let lit_draws = build(
+            &pipeline,
+            &buffers,
+            &position_buffer,
+            positions.len(),
+            &texcoord_buffer,
+            &shade_buffer,
+            &transform,
+        );
+        let flat_draws = build(
+            &unlit,
+            &buffers,
+            &position_buffer,
+            positions.len(),
+            &texcoord_buffer,
+            &shade_buffer,
+            &transform,
+        );
 
         let black = ClearColor {
             red: 0.0,
@@ -323,8 +401,32 @@ fn draws_the_static_props_a_shipped_map_places() {
             alpha: 1.0,
         };
         let frame = device
-            .render_offscreen(size, size, black, &draws)
+            .render_offscreen(size, size, black, &lit_draws)
             .expect("the map's props render");
+        // The same props through a pipeline that ignores the lighting, so
+        // that the lighting can be shown to be what changes the picture
+        // rather than the picture merely looking plausible.
+        let flat = device
+            .render_offscreen(size, size, black, &flat_draws)
+            .expect("the map's props render unlit");
+        for (shaded, plain) in frame
+            .pixels
+            .chunks_exact(4)
+            .zip(flat.pixels.chunks_exact(4))
+        {
+            if plain[..3] == [0, 0, 0] {
+                continue;
+            }
+            compared += 1;
+            let before: u32 = plain[..3].iter().map(|c| u32::from(*c)).sum();
+            let after: u32 = shaded[..3].iter().map(|c| u32::from(*c)).sum();
+            if after < before {
+                darkened += 1;
+            }
+            if after != before {
+                changed += 1;
+            }
+        }
 
         // Props are scattered rather than covering, so this asks that they
         // are there and textured rather than that they fill the view: a
@@ -371,6 +473,28 @@ fn draws_the_static_props_a_shipped_map_places() {
         best_shades > 200,
         "the props draw their own textures rather than a flat fill, got {best_shades} shades"
     );
+    // The map's own light is what puts the props in it rather than
+    // leaving them fullbright, so most of what it touches must come out
+    // different, and most of that darker: a prop is lit by what reaches
+    // the corner it stands in, which is less than full daylight almost
+    // everywhere.
+    assert!(
+        compared > 10_000,
+        "there is a picture to compare, {compared} pixels"
+    );
+    assert!(
+        changed * 10 > compared * 9,
+        "the map's lighting changes what the props draw, {changed} of {compared} pixels"
+    );
+    assert!(
+        darkened * 2 > changed,
+        "most of what the lighting changes it darkens, {darkened} of {changed}"
+    );
+    assert!(
+        lit * 10 > placed * 9,
+        "the map measured light where it stands its props, {lit} of {placed} stand somewhere lit"
+    );
+
     let most = covered.iter().fold(0.0f32, |most, share| most.max(*share));
     assert!(
         most < 0.95,
@@ -382,8 +506,9 @@ fn draws_the_static_props_a_shipped_map_places() {
 
     eprintln!(
         "{placed} props over {loaded} models, {triangles} triangles in {} material runs, \
-         {bound} bound; {drew} of four views held props, the best drawing {best_shades} \
-         shades over {:.0}% of the view",
+         {bound} bound, {lit} standing somewhere the map measured light; {drew} of four \
+         views held props, the best drawing {best_shades} shades over {:.0}% of the view, \
+         and the map's light changed {changed} of {compared} prop pixels, darkening {darkened}",
         runs.len(),
         most * 100.0
     );

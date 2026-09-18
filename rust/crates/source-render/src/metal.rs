@@ -574,9 +574,13 @@ fn check_triangles(triangles: Option<&TriangleList<'_>>) -> Result<()> {
     // Every per-vertex attribute is read once per vertex the draw selects, so
     // each has to hold as many values as there are vertices even when the
     // draw only indexes some of them.
-    for attribute in [triangles.coordinates, triangles.lightmap_coordinates]
-        .into_iter()
-        .flatten()
+    for attribute in [
+        triangles.coordinates,
+        triangles.lightmap_coordinates,
+        triangles.shade,
+    ]
+    .into_iter()
+    .flatten()
     {
         if attribute.stride == 0 {
             return Err(DeviceError::EmptyVertexStride);
@@ -692,6 +696,7 @@ unsafe fn encode_triangles(encoder: Id, triangles: &TriangleList<'_>) {
                 triangles.lightmap_coordinates,
                 crate::LIGHTMAP_COORDINATE_BUFFER_INDEX,
             ),
+            (triangles.shade, crate::SHADE_BUFFER_INDEX),
         ] {
             let Some(attribute) = attribute else {
                 continue;
