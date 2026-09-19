@@ -40,6 +40,8 @@ source-engine.sln
 /target/
 /rust/fuzz/target/
 out-rust-ci/
+# The same build for another game, such as --build-games=episodic.
+out-rust-*/
 out-gate-runs/
 
 # The native C++ oracle build, which is a build output and, under its game
