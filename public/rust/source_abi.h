@@ -1083,6 +1083,8 @@ typedef struct SourceAbiWorldDraw
 	uint64_t triangles;
 	uint64_t map_triangles;
 	uint64_t materials;
+	uint64_t prop_triangles;
+	uint64_t props;
 } SourceAbiWorldDraw;
 
 /* Loads a map onto the presenter's device, read through the context's own

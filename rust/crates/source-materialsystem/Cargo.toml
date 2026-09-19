@@ -10,10 +10,10 @@ source-bsp = { path = "../source-bsp" }
 source-filesystem = { path = "../source-filesystem" }
 source-material = { path = "../source-material" }
 source-render = { path = "../source-render" }
+source-studio = { path = "../source-studio" }
 source-vtf = { path = "../source-vtf" }
 
 [dev-dependencies]
-source-studio = { path = "../source-studio" }
 
 [lints]
 workspace = true

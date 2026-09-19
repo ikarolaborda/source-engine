@@ -67,6 +67,42 @@ const LIT_SHADER: &str = "
     }
 ";
 
+/// Samples a prop's material and scales it by the light measured where the
+/// prop stands.
+///
+/// A prop has no lightmap of its own, because the compiler baked the map
+/// before anything was standing in it, so the light arrives per vertex
+/// from the ambient cube of the leaf the prop is in. The doubling is the
+/// same overbright the world's lighting is stored against.
+const PROP_SHADER: &str = "
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Surface {
+        float4 position [[position]];
+        float2 texcoord;
+        float3 shade;
+    };
+
+    vertex Surface prop_vertex(const device packed_float3 *positions [[buffer(0)]],
+                               const device packed_float2 *texcoords [[buffer(2)]],
+                               const device packed_float3 *shades [[buffer(4)]],
+                               constant float4x4 &view_projection [[buffer(1)]],
+                               uint index [[vertex_id]]) {
+        Surface out;
+        out.position = view_projection * float4(positions[index], 1.0);
+        out.texcoord = texcoords[index];
+        out.shade = shades[index];
+        return out;
+    }
+
+    fragment float4 prop_fragment(Surface in [[stage_in]],
+                                  texture2d<float> base [[texture(0)]]) {
+        constexpr sampler tiling(address::repeat, filter::linear, mip_filter::linear);
+        return float4(base.sample(tiling, in.texcoord).rgb * in.shade * 2.0, 1.0);
+    }
+";
+
 /// How far a frame sees, as a multiple of the map's own longest axis.
 ///
 /// A map is drawn whole rather than faded out at a distance, so the far
@@ -93,8 +129,237 @@ pub struct Scene {
     texcoords: Buffer,
     luxels: Buffer,
     indices: Buffer,
+    /// The props the map is dressed with, absent where it places none or
+    /// ships none of the models it names.
+    props: Option<Props>,
     /// The far plane, from the map's own bounds.
     far: f32,
+}
+
+/// The map's static props, held on the GPU as one set of buffers.
+///
+/// A prop's geometry is transformed into world space once, at load, rather
+/// than per frame: a map places each model as many times as it likes and
+/// none of those placements move, so the alternative is repeating the same
+/// arithmetic every frame for a result that never changes.
+struct Props {
+    pipeline: Pipeline,
+    positions: Buffer,
+    texcoords: Buffer,
+    shades: Buffer,
+    indices: Buffer,
+    vertex_count: usize,
+    /// The resolved material path of each run, indexed by the runs below.
+    materials: Vec<String>,
+    placed: Vec<PlacedProp>,
+}
+
+/// One placement of one model, with the bounds a frame culls it by.
+struct PlacedProp {
+    mins: [f32; 3],
+    maxs: [f32; 3],
+    /// The material each of this prop's runs draws with, and the run.
+    runs: Vec<(usize, u32, u32)>,
+}
+
+impl Props {
+    /// Loads every model the map places, once each, and transforms each
+    /// placement into world space.
+    ///
+    /// Returns `None` where the map places no props or none of the models
+    /// it names can be drawn, since a set of empty buffers is not
+    /// something a frame should have to test for.
+    fn load(
+        device: &Device,
+        paths: &SearchPaths,
+        bsp: &Bsp,
+        world: &source_bsp::World,
+        materials: &mut MaterialSystem,
+    ) -> Option<Self> {
+        let props = source_bsp::StaticProps::parse(bsp).ok()?;
+        if props.props().is_empty() {
+            return None;
+        }
+        // Absent ambient lighting leaves every prop black, so an unlit map
+        // is drawn at full albedo rather than invisibly.
+        let ambient = source_bsp::AmbientLighting::parse(bsp).ok();
+
+        // One load per named model however many times the map places it.
+        let models: Vec<Option<Model>> = props
+            .names()
+            .iter()
+            .map(|name| load_model(paths, name))
+            .collect();
+
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut texcoords: Vec<[f32; 2]> = Vec::new();
+        let mut shades: Vec<[f32; 3]> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut placed: Vec<PlacedProp> = Vec::new();
+
+        for prop in props.props() {
+            let Some(model) = models.get(prop.model).and_then(Option::as_ref) else {
+                continue;
+            };
+            let placement = source_bsp::StaticProps::placement(prop);
+            let base = u32::try_from(positions.len()).ok()?;
+
+            // Sampled once at the prop's own origin rather than per
+            // vertex, which is what the engine does, and is why a tall
+            // prop is lit as one thing rather than shading up its height.
+            let cube = ambient
+                .as_ref()
+                .and_then(|ambient| ambient.at(world, prop.origin))
+                .unwrap_or_default();
+            let unlit = cube.peak() <= 0.0;
+
+            let mut mins = [f32::MAX; 3];
+            let mut maxs = [f32::MIN; 3];
+            for ((position, normal), texcoord) in model
+                .positions
+                .iter()
+                .zip(&model.normals)
+                .zip(&model.texcoords)
+            {
+                let position = placement.apply(*position);
+                for axis in 0..3 {
+                    mins[axis] = mins[axis].min(position[axis]);
+                    maxs[axis] = maxs[axis].max(position[axis]);
+                }
+                positions.push(position);
+                texcoords.push(*texcoord);
+                shades.push(if unlit {
+                    [1.0, 1.0, 1.0]
+                } else {
+                    source_bsp::encode_for_display(cube.shade(placement.rotate(*normal)))
+                });
+            }
+
+            let mut runs = Vec::new();
+            for (material, run) in &model.runs {
+                let material = match names.iter().position(|name| name == material) {
+                    Some(index) => index,
+                    None => {
+                        names.push(material.clone());
+                        names.len() - 1
+                    }
+                };
+                let first = u32::try_from(indices.len()).ok()?;
+                indices.extend(run.iter().map(|index| index + base));
+                let count = u32::try_from(run.len()).ok()?;
+                runs.push((material, first, count));
+            }
+            placed.push(PlacedProp { mins, maxs, runs });
+        }
+
+        if indices.is_empty() {
+            return None;
+        }
+
+        for name in &names {
+            let _ = materials.bind(device, paths, name);
+        }
+
+        let library = device.compile_library(PROP_SHADER).ok()?;
+        Some(Self {
+            pipeline: device
+                .create_depth_pipeline(&library, "prop_vertex", "prop_fragment")
+                .ok()?,
+            positions: device.create_buffer(as_bytes(&positions)).ok()?,
+            texcoords: device.create_buffer(as_bytes(&texcoords)).ok()?,
+            shades: device.create_buffer(as_bytes(&shades)).ok()?,
+            indices: device.create_buffer(as_bytes(&indices)).ok()?,
+            vertex_count: positions.len(),
+            materials: names,
+            placed,
+        })
+    }
+
+    /// The triangles every placement holds together.
+    fn triangle_count(&self) -> usize {
+        self.placed
+            .iter()
+            .flat_map(|prop| prop.runs.iter())
+            .map(|(_, _, count)| *count as usize)
+            .sum::<usize>()
+            / 3
+    }
+}
+
+/// Whether a material is one of the compiler's own rather than one the
+/// map means to show.
+///
+/// A map is built with surfaces that exist to be reasoned about and not to
+/// be seen: the volumes that fire triggers, the planes that stop a player
+/// but not a bullet, the faces the compiler was told to discard. They
+/// carry materials under `tools/` and the engine draws none of them. They
+/// are also frequently the largest surfaces in a map and sit around the
+/// player rather than in front of them, so drawing them does not add a
+/// stray detail somewhere, it fills the view and hides the map behind it.
+///
+/// Refusing to bind their materials is what skips them, because a batch
+/// whose material never resolved to a texture is already dropped.
+fn is_tool_material(name: &str) -> bool {
+    name.len() >= 6 && name[..6].eq_ignore_ascii_case("tools/")
+}
+
+/// One model's geometry in its own space, before it is placed.
+struct Model {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    texcoords: Vec<[f32; 2]>,
+    /// One run of indices per material the model draws with.
+    runs: Vec<(String, Vec<u32>)>,
+}
+
+/// Joins the three files a model is split across and resolves its
+/// materials against the content that is actually installed.
+///
+/// A model whose files are missing, mismatched or name a material nothing
+/// ships is skipped rather than failing the map: maps name models the base
+/// game does not include, and a map that draws most of its props is worth
+/// more than one that draws none.
+fn load_model(paths: &SearchPaths, name: &str) -> Option<Model> {
+    let mdl_bytes = paths.read(name, None).ok()?;
+    let vvd_bytes = paths.read(&name.replace(".mdl", ".vvd"), None).ok()?;
+    let vtx_bytes = paths.read(&name.replace(".mdl", ".dx90.vtx"), None).ok()?;
+
+    let mdl = source_studio::Mdl::parse(&mdl_bytes).ok()?;
+    let vvd = source_studio::Vvd::parse(&vvd_bytes).ok()?;
+    let vtx = source_studio::Vtx::parse(&vtx_bytes).ok()?;
+    // The compiler stamps all three with the same checksum, so a set that
+    // does not match is refused rather than drawn as nonsense.
+    if mdl.checksum != vvd.checksum || mdl.checksum != vtx.checksum {
+        return None;
+    }
+
+    let vertices = vvd.vertices(&vvd_bytes, 0).ok()?;
+    let meshes = source_studio::triangles(&mdl, &mdl_bytes, &vtx, &vtx_bytes, 0).ok()?;
+    let (materials, directories) = mdl.materials(&mdl_bytes).ok()?;
+
+    let mut runs: Vec<(String, Vec<u32>)> = Vec::new();
+    for mesh in meshes {
+        let material = materials.get(mesh.material)?;
+        let resolved = directories.iter().find_map(|directory| {
+            let candidate = format!("{directory}{material}");
+            paths
+                .read(&format!("materials/{candidate}.vmt"), None)
+                .is_ok()
+                .then_some(candidate)
+        })?;
+        match runs.iter_mut().find(|(name, _)| *name == resolved) {
+            Some((_, indices)) => indices.extend_from_slice(&mesh.indices),
+            None => runs.push((resolved, mesh.indices)),
+        }
+    }
+
+    Some(Model {
+        positions: vertices.iter().map(|vertex| vertex.position).collect(),
+        normals: vertices.iter().map(|vertex| vertex.normal).collect(),
+        texcoords: vertices.iter().map(|vertex| vertex.texcoord).collect(),
+        runs,
+    })
 }
 
 /// What a frame did, so a caller can tell a drawn frame from an empty one
@@ -105,6 +370,11 @@ pub struct Drawn {
     pub batches: usize,
     /// Indices in those draws, which is three per triangle.
     pub indices: usize,
+    /// How many of those draws were the world rather than its props, so a
+    /// frame that lost one or the other says which.
+    pub world_batches: usize,
+    /// Triangles the frame's props covered.
+    pub prop_triangles: usize,
 }
 
 impl Scene {
@@ -194,7 +464,7 @@ impl Scene {
             let Some(name) = names.name(batch.texdata) else {
                 continue;
             };
-            if !seen.insert(name.to_owned()) {
+            if is_tool_material(name) || !seen.insert(name.to_owned()) {
                 continue;
             }
             let _ = materials.bind(device, paths, name);
@@ -223,6 +493,8 @@ impl Scene {
             .max(high[2] - low[2])
             .max(1000.0);
 
+        let props = Props::load(device, paths, &bsp, &world, &mut materials);
+
         Ok(Self {
             world,
             surfaces,
@@ -236,6 +508,7 @@ impl Scene {
             texcoords,
             luxels,
             indices,
+            props,
             far: span * FAR_PLANE_REACH,
         })
     }
@@ -279,7 +552,9 @@ impl Scene {
             Err(_) => self.geometry.batches.clone(),
         };
 
-        let draws: Vec<TriangleList<'_>> = batches
+
+        let frustum = Frustum::new(transform.frustum_planes());
+        let mut draws: Vec<TriangleList<'_>> = batches
             .iter()
             .filter_map(|batch| {
                 let name = self.names.name(batch.texdata)?;
@@ -309,10 +584,68 @@ impl Scene {
                 )
             })
             .collect();
+        let world_draws = draws.len();
+        let world_indices: usize = batches
+            .iter()
+            .filter(|batch| {
+                self.names
+                    .name(batch.texdata)
+                    .and_then(|name| self.materials.get(name))
+                    .is_some_and(|binding| binding.texture.is_some())
+            })
+            .map(|batch| batch.index_count)
+            .sum();
 
-        // Counted from the batches rather than the draws, because a batch
-        // whose material never bound produces no draw and so contributes
-        // nothing to either figure.
+        // The props the map is dressed with, each culled by its own
+        // world-space bounds rather than by where it was placed, because a
+        // lamppost's geometry stands a long way above the point that
+        // places it.
+        let mut prop_indices = 0usize;
+        if let Some(props) = &self.props {
+            for prop in &props.placed {
+                if frustum.excludes(prop.mins, prop.maxs) {
+                    continue;
+                }
+                for (material, first, count) in &prop.runs {
+                    let Some(texture) = props
+                        .materials
+                        .get(*material)
+                        .and_then(|name| self.materials.get(name))
+                        .and_then(|binding| binding.texture.as_ref())
+                    else {
+                        continue;
+                    };
+                    prop_indices += *count as usize;
+                    draws.push(
+                        TriangleList::new(
+                            &props.pipeline,
+                            Vertices::Buffered {
+                                buffer: &props.positions,
+                                count: props.vertex_count,
+                                stride: std::mem::size_of::<[f32; 3]>(),
+                            },
+                        )
+                        .with_texture(texture)
+                        .with_coordinates(VertexAttribute::packed::<[f32; 2]>(&props.texcoords))
+                        .with_shade(VertexAttribute::packed::<[f32; 3]>(&props.shades))
+                        .with_indices(Indices {
+                            buffer: &props.indices,
+                            count: *count as usize,
+                            format: IndexFormat::Uint32,
+                            first: *first as usize,
+                        })
+                        .with_uniforms(transform.as_bytes()),
+                    );
+                }
+            }
+        }
+        let drawn = Drawn {
+            batches: draws.len(),
+            indices: world_indices + prop_indices,
+            world_batches: world_draws,
+            prop_triangles: prop_indices / 3,
+        };
+
         // A run can be asked to keep the frames it presents, which is the
         // only way to see what reached the screen on a machine where
         // nothing may record the display. These are the presented
@@ -327,25 +660,9 @@ impl Scene {
             let index = SHOTS_TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = std::path::Path::new(&directory).join(format!("frame-{index:04}.ppm"));
             write_ppm(&path, &frame, width, height);
-            return Ok(Drawn {
-                batches: draws.len(),
-                indices: batches.iter().map(|batch| batch.index_count).sum(),
-            });
+            return Ok(drawn);
         }
 
-        let drawn = Drawn {
-            batches: draws.len(),
-            indices: batches
-                .iter()
-                .filter(|batch| {
-                    self.names
-                        .name(batch.texdata)
-                        .and_then(|name| self.materials.get(name))
-                        .is_some_and(|binding| binding.texture.is_some())
-                })
-                .map(|batch| batch.index_count)
-                .sum(),
-        };
         device
             .present(
                 swapchain,
@@ -381,9 +698,17 @@ impl Scene {
         )
     }
 
-    /// The triangles the whole map holds, which is what a frame draws from.
+    /// The triangles the whole map holds, which is what a frame draws
+    /// from: its world and brush models, plus every prop it places.
     pub fn triangle_count(&self) -> usize {
         self.geometry.indices.len() / 3
+            + self.props.as_ref().map_or(0, Props::triangle_count)
+    }
+
+    /// How many placements of a prop the map draws, which is zero where it
+    /// places none or ships none of the models it names.
+    pub fn prop_count(&self) -> usize {
+        self.props.as_ref().map_or(0, |props| props.placed.len())
     }
 
     /// How many of the map's materials resolved to a texture.

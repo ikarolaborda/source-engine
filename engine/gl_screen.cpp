@@ -252,9 +252,10 @@ static void SCR_PresentRustWorld( void )
 			Warning( "Rust Metal scene load failed for %s (status %d)\n", level, status );
 			return;
 		}
-		Msg( "Rust Metal scene: %llu triangles, %llu materials (%s)\n",
+		Msg( "Rust Metal scene: %llu triangles, %llu materials, %llu props (%s)\n",
 			(unsigned long long)drawn.map_triangles,
-			(unsigned long long)drawn.materials, level );
+			(unsigned long long)drawn.materials,
+			(unsigned long long)drawn.props, level );
 	}
 	if ( !s_SceneReady )
 		return;
@@ -278,9 +279,10 @@ static void SCR_PresentRustWorld( void )
 	if ( now >= s_NextReport )
 	{
 		s_NextReport = now + 1.0;
-		Msg( "RUST_METAL_FRAME batches=%llu triangles=%llu of=%llu eye=%.0f %.0f %.0f "
-			"angles=%.0f %.0f\n",
+		Msg( "RUST_METAL_FRAME batches=%llu triangles=%llu props=%llu of=%llu "
+			"eye=%.0f %.0f %.0f angles=%.0f %.0f\n",
 			(unsigned long long)drawn.batches, (unsigned long long)drawn.triangles,
+			(unsigned long long)drawn.prop_triangles,
 			(unsigned long long)drawn.map_triangles, position[ 0 ], position[ 1 ],
 			position[ 2 ], angles[ 0 ], angles[ 1 ] );
 	}

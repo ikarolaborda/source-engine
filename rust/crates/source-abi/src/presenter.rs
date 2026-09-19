@@ -210,6 +210,10 @@ pub struct SourceAbiWorldDraw {
     pub map_triangles: u64,
     /// Materials that resolved to a texture when the map was loaded.
     pub materials: u64,
+    /// Triangles of that total which were the map's props.
+    pub prop_triangles: u64,
+    /// Placements of a prop the map draws.
+    pub props: u64,
 }
 
 /// Loads a map onto a presenter's device, ready to be drawn.
@@ -265,6 +269,8 @@ pub unsafe extern "C" fn source_render_world_load(
                     triangles: 0,
                     map_triangles: scene.triangle_count() as u64,
                     materials: scene.bound_materials() as u64,
+                    prop_triangles: 0,
+                    props: scene.prop_count() as u64,
                 };
                 // SAFETY: the caller guarantees writable storage.
                 unsafe { std::ptr::write(out_drawn, drawn) };
@@ -334,6 +340,8 @@ pub unsafe extern "C" fn source_render_world_present(
                             triangles: (drawn.indices / 3) as u64,
                             map_triangles: scene.triangle_count() as u64,
                             materials: scene.bound_materials() as u64,
+                            prop_triangles: drawn.prop_triangles as u64,
+                            props: scene.prop_count() as u64,
                         };
                         // SAFETY: the caller guarantees writable storage.
                         unsafe { std::ptr::write(out_drawn, drawn) };
