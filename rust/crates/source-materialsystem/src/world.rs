@@ -375,6 +375,8 @@ pub struct Drawn {
     pub world_batches: usize,
     /// Triangles the frame's props covered.
     pub prop_triangles: usize,
+    /// Draws that were the interface over the world rather than the world.
+    pub overlay_batches: usize,
 }
 
 impl Scene {
@@ -519,11 +521,19 @@ impl Scene {
     /// which the compiler worked out ahead of time, and by the view's own
     /// bounding planes. A map holds far more world than any one place in it
     /// can see, and drawing the rest is work no pixel depends on.
+    /// Draws the map from `eye`, with `overlay` composited over it in the
+    /// same pass.
+    ///
+    /// The interface shares the pass rather than taking one of its own
+    /// because a second pass would have to either clear what the first
+    /// drew or load it back, and the interface is meant to sit on the
+    /// world rather than replace it.
     pub fn present(
         &self,
         device: &Device,
         swapchain: &Swapchain,
         eye: Eye,
+        overlay: Option<&crate::Overlay>,
     ) -> Result<Drawn, Error> {
         let (width, height) = swapchain.size();
         if width == 0 || height == 0 {
@@ -639,11 +649,19 @@ impl Scene {
                 }
             }
         }
+        let viewport = crate::overlay::viewport(width as f32, height as f32);
+        let overlay_draws = overlay.map_or(0, |overlay| {
+            let before = draws.len();
+            draws.extend(overlay.draws(&viewport));
+            draws.len() - before
+        });
+
         let drawn = Drawn {
             batches: draws.len(),
             indices: world_indices + prop_indices,
             world_batches: world_draws,
             prop_triangles: prop_indices / 3,
+            overlay_batches: overlay_draws,
         };
 
         // A run can be asked to keep the frames it presents, which is the

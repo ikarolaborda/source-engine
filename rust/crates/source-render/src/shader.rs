@@ -103,6 +103,12 @@ pub(crate) unsafe fn compile(device: Id, source: &str) -> Result<Library> {
 ///
 /// # Safety
 /// `device` must be a live Metal device, called inside an autorelease pool.
+/// `MTLBlendFactorSourceAlpha`.
+const BLEND_FACTOR_SOURCE_ALPHA: u64 = 4;
+
+/// `MTLBlendFactorOneMinusSourceAlpha`.
+const BLEND_FACTOR_ONE_MINUS_SOURCE_ALPHA: u64 = 5;
+
 pub(crate) unsafe fn build_pipeline(
     device: Id,
     library: &Library,
@@ -110,6 +116,7 @@ pub(crate) unsafe fn build_pipeline(
     fragment: &str,
     pixel_format: u64,
     depth: bool,
+    blend: bool,
 ) -> Result<Pipeline> {
     // SAFETY: each receiver is live and each selector is sent with the
     // signature Metal declares for it.
@@ -138,6 +145,38 @@ pub(crate) unsafe fn build_pipeline(
             return Err(DeviceError::NoPipelineDescriptor);
         }
         crate::objc::send_void_with_usize(attachment, selector(c"setPixelFormat:"), pixel_format);
+        if blend {
+            // Straight alpha compositing: the source contributes in
+            // proportion to its own alpha and displaces that much of what
+            // is already there. This is what a user interface is drawn
+            // with, because a glyph is a coverage mask rather than a
+            // rectangle of colour and a panel is frequently translucent.
+            crate::objc::send_void_with_usize(
+                attachment,
+                selector(c"setBlendingEnabled:"),
+                1,
+            );
+            for setter in [
+                c"setSourceRGBBlendFactor:",
+                c"setSourceAlphaBlendFactor:",
+            ] {
+                crate::objc::send_void_with_usize(
+                    attachment,
+                    selector(setter),
+                    BLEND_FACTOR_SOURCE_ALPHA,
+                );
+            }
+            for setter in [
+                c"setDestinationRGBBlendFactor:",
+                c"setDestinationAlphaBlendFactor:",
+            ] {
+                crate::objc::send_void_with_usize(
+                    attachment,
+                    selector(setter),
+                    BLEND_FACTOR_ONE_MINUS_SOURCE_ALPHA,
+                );
+            }
+        }
         if depth {
             crate::objc::send_void_with_usize(
                 descriptor.as_id(),

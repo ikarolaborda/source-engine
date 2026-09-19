@@ -87,6 +87,10 @@
 
 #include "IVguiModule.h"
 #include "vgui_baseui_interface.h"
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 #include "vgui_DebugSystemPanel.h"
 #include "toolframework/itoolframework.h"
 #include "filesystem/IQueuedLoader.h"
@@ -1703,9 +1707,24 @@ void CEngineVGui::Paint( PaintMode_t mode )
 		return;
 	}
 
-	if ( !drawVgui || m_bNoShaderAPI )
+	if ( !drawVgui )
 	{
 		return;
+	}
+
+	// -noshaderapi normally means nothing can be drawn, so the interface
+	// is skipped outright. That is no longer true when the Rust renderer
+	// is attached: it has somewhere to put these quads, and skipping the
+	// paint means the HUD's own elements never run, so there is nothing
+	// to draw rather than something drawn nowhere.
+	if ( m_bNoShaderAPI )
+	{
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+		if ( !source_rust_bridge_ui_active() )
+			return;
+#else
+		return;
+#endif
 	}
 
 	// draw from the main panel down

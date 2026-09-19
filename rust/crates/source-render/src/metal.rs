@@ -134,6 +134,7 @@ impl Device {
                 fragment,
                 PIXEL_FORMAT_BGRA8_UNORM,
                 false,
+                false,
             )
         }
     }
@@ -158,6 +159,37 @@ impl Device {
                 vertex,
                 fragment,
                 PIXEL_FORMAT_BGRA8_UNORM,
+                true,
+                false,
+            )
+        }
+    }
+
+    /// Builds a render pipeline that composites over what is already drawn
+    /// instead of replacing it.
+    ///
+    /// It carries a depth attachment like `create_depth_pipeline` even
+    /// though a user interface has no depth of its own, because a pass
+    /// either has that attachment or it does not and the interface is
+    /// drawn into the same pass as the world it sits over. Quads are
+    /// emitted at the near plane so they pass the comparison the world is
+    /// drawn under rather than needing one of their own.
+    pub fn create_blended_pipeline(
+        &self,
+        library: &Library,
+        vertex: &str,
+        fragment: &str,
+    ) -> Result<Pipeline> {
+        let _pool = AutoreleasePool::new();
+        // SAFETY: as above, with a live library owned by the caller.
+        unsafe {
+            crate::shader::build_pipeline(
+                self.device.as_id(),
+                library,
+                vertex,
+                fragment,
+                PIXEL_FORMAT_BGRA8_UNORM,
+                true,
                 true,
             )
         }

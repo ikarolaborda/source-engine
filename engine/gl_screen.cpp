@@ -270,6 +270,13 @@ static void SCR_PresentRustWorld( void )
 	const float position[ 3 ] = { g_CurrentViewOrigin.x, g_CurrentViewOrigin.y,
 		g_CurrentViewOrigin.z };
 	const float angles[ 3 ] = { viewAngles.x, viewAngles.y, viewAngles.z };
+
+	// Closed here rather than where it was opened, so everything the
+	// interface painted during the view is uploaded before the present
+	// that composites it over the world.
+	uint64_t quads = 0;
+	source_rust_bridge_ui_end( &quads );
+
 	source_rust_bridge_scene_present( position, angles, &drawn );
 
 	// One line a second rather than one a frame, which is enough to show
@@ -280,10 +287,11 @@ static void SCR_PresentRustWorld( void )
 	{
 		s_NextReport = now + 1.0;
 		Msg( "RUST_METAL_FRAME batches=%llu triangles=%llu props=%llu of=%llu "
-			"eye=%.0f %.0f %.0f angles=%.0f %.0f\n",
+			"ui=%llu eye=%.0f %.0f %.0f angles=%.0f %.0f\n",
 			(unsigned long long)drawn.batches, (unsigned long long)drawn.triangles,
 			(unsigned long long)drawn.prop_triangles,
-			(unsigned long long)drawn.map_triangles, position[ 0 ], position[ 1 ],
+			(unsigned long long)drawn.map_triangles, (unsigned long long)quads,
+			position[ 0 ], position[ 1 ],
 			position[ 2 ], angles[ 0 ], angles[ 1 ] );
 	}
 }
@@ -359,6 +367,13 @@ void SCR_UpdateScreen( void )
 	Shader_BeginRendering();
 				
 	// Draw world, etc.
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Opened before the view renders, because the interface is painted
+	// from inside it and its quads have to be gathered by the time the
+	// frame is presented below.
+	source_rust_bridge_ui_begin();
+#endif
+
 	V_RenderView();
 
 #if defined( SOURCE_RUST_ENGINE ) && defined( OSX )

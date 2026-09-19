@@ -1098,6 +1098,26 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_render_world_load(
 /* Draws the loaded map from the engine's own view and presents it.
  * `position` and `angles` are each three floats, in the engine's units and
  * its pitch-yaw-roll order. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_begin( SourceAbiHandle handle );
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_texture(
+	SourceAbiHandle handle,
+	uint32_t id,
+	uint32_t width,
+	uint32_t height,
+	const uint8_t *rgba );
+
+SOURCE_ABI_EXPORT int32_t source_render_ui_has_texture( SourceAbiHandle handle, uint32_t id );
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_quad(
+	SourceAbiHandle handle,
+	uint32_t texture,
+	const float *bounds,
+	const float *coords,
+	const float *tint );
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_end( SourceAbiHandle handle, uint64_t *out_quads );
+
 SOURCE_ABI_EXPORT SourceAbiStatus source_render_world_present(
 	SourceAbiHandle handle,
 	const float *position,

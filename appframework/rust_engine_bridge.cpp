@@ -1767,3 +1767,50 @@ SourceAbiStatus CRustEngineBridge::ProbeVpkScene(const char *directoryPath,
 	return source_context_probe_vpk_scene(m_Handle, directoryPathSlice, entryPathSlice,
 		sceneCount, stringCount);
 }
+
+extern "C" bool source_rust_bridge_ui_active()
+{
+	return g_MetalPresenterHandle.load( std::memory_order_acquire ) != 0;
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_ui_begin()
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_begin( presenter );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_ui_texture(
+	uint32_t id, uint32_t width, uint32_t height, const uint8_t *rgba )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 || rgba == NULL )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_texture( presenter, id, width, height, rgba );
+}
+
+extern "C" bool source_rust_bridge_ui_has_texture( uint32_t id )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return false;
+	return source_render_ui_has_texture( presenter, id ) != 0;
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_ui_quad(
+	uint32_t texture, const float *bounds, const float *coords, const float *tint )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_quad( presenter, texture, bounds, coords, tint );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_ui_end( uint64_t *quads )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_end( presenter, quads );
+}

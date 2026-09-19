@@ -12,8 +12,10 @@
 //! Metal. Only the formats Metal has no equivalent for are converted, and
 //! each of those conversions is named below.
 
-pub mod world;
+pub mod overlay;
+mod world;
 
+pub use overlay::{Overlay, Quad};
 pub use world::Scene;
 
 use source_filesystem::SearchPaths;

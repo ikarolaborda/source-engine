@@ -39,6 +39,22 @@ ILauncherMgr *g_pLauncherMgr = NULL;
 #include "vgui_surfacelib/FontManager.h"
 #include "FontTextureCache.h"
 #include "MatSystemSurface.h"
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+#include "../appframework/rust_engine_bridge.h"
+#endif
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+// The texture the next quad samples, as the Rust renderer names it. VGUI
+// identifies its textures by an integer of its own and the renderer keeps
+// the same one, so the two never have to be reconciled. Zero means the
+// quad is a flat colour, which is what a filled rectangle is: VGUI draws
+// those through a white material rather than through no material, and a
+// white texel multiplied by the colour is the same result without a
+// second pipeline to maintain.
+static uint32_t g_RustUITexture = 0;
+
+#endif
 #include "inputsystem/iinputsystem.h"
 #include <vgui_controls/Controls.h>
 #include <vgui/ISystem.h>
@@ -889,6 +905,12 @@ void CMatSystemSurface::DrawSetColor(Color col)
 //-----------------------------------------------------------------------------
 void CMatSystemSurface::InternalSetMaterial( IMaterial *pMaterial )
 {
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// A caller that passes no material wants the white one, which is how
+	// VGUI draws a flat colour; anything else is drawing the texture it
+	// has bound.
+	g_RustUITexture = pMaterial ? (uint32_t)m_iBoundTexture : 0;
+#endif
 	if (!pMaterial)
 	{
 		pMaterial = m_pWhite;
@@ -1048,11 +1070,43 @@ void CMatSystemSurface::DrawTexturedPolyLine( const vgui::Vertex_t *p,int n )
 //-----------------------------------------------------------------------------
 // Draws a quad: 
 //-----------------------------------------------------------------------------
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+// Forwards one screen-space rectangle. VGUI has already clipped and
+// translated it by the time it reaches here, so these are final screen
+// coordinates and nothing downstream needs the panel they came from.
+static void Rust_ForwardQuad(
+	float x0, float y0, float x1, float y1,
+	float s0, float t0, float s1, float t1,
+	const unsigned char *color )
+{
+	const float bounds[ 4 ] = { x0, y0, x1, y1 };
+	const float coords[ 4 ] = { s0, t0, s1, t1 };
+	const float tint[ 4 ] = {
+		color[ 0 ] / 255.0f, color[ 1 ] / 255.0f,
+		color[ 2 ] / 255.0f, color[ 3 ] / 255.0f };
+	source_rust_bridge_ui_quad( g_RustUITexture, bounds, coords, tint );
+}
+#endif
+
 void CMatSystemSurface::DrawQuad( const vgui::Vertex_t &ul, const vgui::Vertex_t &lr, unsigned char *pColor )
 {
 	MAT_FUNC;
 	
 	Assert( !m_bIn3DPaintMode );
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Ahead of the mesh check below, because with no shader API there is
+	// no dynamic mesh to build into and the quad would be dropped before
+	// the renderer that can draw it ever saw it.
+	if ( source_rust_bridge_ui_active() )
+	{
+		Rust_ForwardQuad(
+			ul.m_Position.x, ul.m_Position.y, lr.m_Position.x, lr.m_Position.y,
+			ul.m_TexCoord.x, ul.m_TexCoord.y, lr.m_TexCoord.x, lr.m_TexCoord.y,
+			pColor );
+	}
+#endif
 
 	if ( !m_pMesh )
 		return;
@@ -1092,6 +1146,37 @@ void CMatSystemSurface::DrawQuadArray( int quadCount, vgui::Vertex_t *pVerts, un
 	MAT_FUNC;
 
 	Assert( !m_bIn3DPaintMode );
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Text arrives here rather than through DrawQuad: a run of characters
+	// is batched into one array of corner pairs, so this is the path the
+	// HUD's numbers and every label in the interface take. As above, it
+	// runs ahead of the mesh check because with no shader API there is no
+	// mesh to build into.
+	if ( source_rust_bridge_ui_active() )
+	{
+		for ( int i = 0; i < quadCount; ++i )
+		{
+			vgui::Vertex_t clippedUpper;
+			vgui::Vertex_t clippedLower;
+			const vgui::Vertex_t *upper = &pVerts[ 2 * i ];
+			const vgui::Vertex_t *lower = &pVerts[ 2 * i + 1 ];
+			if ( bShouldClip )
+			{
+				if ( !ClipRect( *upper, *lower, &clippedUpper, &clippedLower ) )
+					continue;
+				upper = &clippedUpper;
+				lower = &clippedLower;
+			}
+			Rust_ForwardQuad(
+				upper->m_Position.x, upper->m_Position.y,
+				lower->m_Position.x, lower->m_Position.y,
+				upper->m_TexCoord.x, upper->m_TexCoord.y,
+				lower->m_TexCoord.x, lower->m_TexCoord.y,
+				pColor );
+		}
+	}
+#endif
 
 	if ( !m_pMesh )
 		return;
@@ -3987,6 +4072,15 @@ bool CMatSystemSurface::BHTMLWindowNeedsPaint(IHTML *htmlwin)
 void CMatSystemSurface::DrawSetTextureRGBA(int id, const unsigned char* rgba, int wide, int tall, int hardwareFilter, bool forceUpload)
 {
 	TextureDictionary()->SetTextureRGBAEx( id, (const char *)rgba, wide, tall, IMAGE_FORMAT_RGBA8888, false );
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// This is the path a font arrives by: VGUI rasterises a character
+	// sheet itself and hands over the pixels, so the renderer never has
+	// to know how to shape text, only where each glyph goes.
+	if ( source_rust_bridge_ui_active() && rgba != NULL && wide > 0 && tall > 0 )
+	{
+		source_rust_bridge_ui_texture( (uint32_t)id, (uint32_t)wide, (uint32_t)tall, rgba );
+	}
+#endif
 }
 
 void CMatSystemSurface::DrawSetTextureRGBAEx( int id, const unsigned char* rgba, int wide, int tall, ImageFormat format )

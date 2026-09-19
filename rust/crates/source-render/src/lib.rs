@@ -684,6 +684,15 @@ impl Device {
         match self.0 {}
     }
 
+    pub fn create_blended_pipeline(
+        &self,
+        _library: &Library,
+        _vertex: &str,
+        _fragment: &str,
+    ) -> Result<Pipeline> {
+        match self.0 {}
+    }
+
     pub fn create_swapchain(&self, _width: u32, _height: u32, _scale: f64) -> Result<Swapchain> {
         match self.0 {}
     }

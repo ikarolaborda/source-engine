@@ -47,8 +47,15 @@ def build(bld):
 	]
 
 	defines = []
+	if bld.env.RUST_ENGINE:
+		defines += ['SOURCE_RUST_ENGINE=1']
 
 	libs = ['bitmap','mathlib','tier0','vgui_controls','tier1','vstdlib','tier2','tier3','vgui_surfacelib','FT2','FC','SDL2']
+	# The interface's own quads are forwarded to the Rust renderer from
+	# here, which is where VGUI has finished with them and they are
+	# screen-space rectangles rather than panels.
+	if bld.env.RUST_ENGINE:
+		libs += ['rust_engine_bridge']
 
 	if bld.env.DEST_OS == 'android':
 		libs += ['EXPAT']

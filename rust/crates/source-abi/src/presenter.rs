@@ -33,6 +33,10 @@ struct Presenter {
     /// device. A presenter without one still presents, as a clear, which
     /// is what the frames before a map loads are.
     scene: Option<source_materialsystem::Scene>,
+    /// The engine's two-dimensional output for the frame being built. It
+    /// outlives a frame because the textures it holds do: the engine
+    /// rasterises a font once and names it for as long as it runs.
+    overlay: Option<source_materialsystem::Overlay>,
 }
 
 #[cfg(target_os = "macos")]
@@ -107,6 +111,7 @@ pub unsafe extern "C" fn source_render_presenter_create(
                         swapchain,
                         window,
                         scene: None,
+                        overlay: None,
                     },
                 )
             });
@@ -332,7 +337,12 @@ pub unsafe extern "C" fn source_render_world_present(
                 return SOURCE_ABI_INVALID_HANDLE;
             };
             let eye = source_render::Eye { position, angles };
-            match scene.present(&presenter.device, &presenter.swapchain, eye) {
+            match scene.present(
+                &presenter.device,
+                &presenter.swapchain,
+                eye,
+                presenter.overlay.as_ref(),
+            ) {
                 Ok(drawn) => {
                     if !out_drawn.is_null() {
                         let drawn = SourceAbiWorldDraw {
@@ -438,6 +448,200 @@ pub unsafe extern "C" fn source_render_presenter_drawable_size(
     })
 }
 
+/// Discards the two-dimensional output gathered so far, which is how a
+/// frame's interface starts.
+///
+/// Creating the overlay is deferred to here rather than done with the
+/// presenter, because a run that never draws an interface should not pay
+/// for a pipeline and a texture it will not use.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_begin(handle: SourceAbiHandle) -> SourceAbiStatus {
+    ffi_status(|| {
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(presenter) = presenters.get_mut(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            if presenter.overlay.is_none() {
+                match source_materialsystem::Overlay::new(&presenter.device) {
+                    Ok(overlay) => presenter.overlay = Some(overlay),
+                    Err(_) => return SOURCE_ABI_INTERNAL_ERROR,
+                }
+            }
+            if let Some(overlay) = presenter.overlay.as_mut() {
+                overlay.clear();
+            }
+            SOURCE_ABI_OK
+        })
+    })
+}
+
+/// Hands over the pixels of a texture the engine has rasterised, naming it
+/// `id` for the rectangles that will sample it.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created, and `rgba` must
+/// point at `width * height * 4` readable bytes.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_texture(
+    handle: SourceAbiHandle,
+    id: u32,
+    width: u32,
+    height: u32,
+    rgba: *const u8,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if rgba.is_null() || width == 0 || height == 0 {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        let Some(count) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|texels| texels.checked_mul(4))
+        else {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller guarantees this many readable bytes, and the
+        // slice is only read before this call returns.
+        let pixels = unsafe { std::slice::from_raw_parts(rgba, count) };
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(presenter) = presenters.get_mut(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let device = &presenter.device;
+            let Some(overlay) = presenter.overlay.as_mut() else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            match overlay.set_texture(device, id, width, height, pixels) {
+                Ok(()) => SOURCE_ABI_OK,
+                Err(_) => SOURCE_ABI_INTERNAL_ERROR,
+            }
+        })
+    })
+}
+
+/// Whether a texture identifier already holds pixels, so the engine can
+/// skip handing over a sheet that has not changed.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_has_texture(handle: SourceAbiHandle, id: u32) -> i32 {
+    PRESENTERS.with(|presenters| {
+        let presenters = presenters.borrow();
+        i32::from(
+            presenters
+                .get(&handle)
+                .and_then(|presenter| presenter.overlay.as_ref())
+                .is_some_and(|overlay| overlay.has_texture(id)),
+        )
+    })
+}
+
+/// Adds one screen-space rectangle to the frame being gathered.
+///
+/// `bounds` is left, top, right and bottom in pixels; `coords` is the
+/// texture coordinate of each of those corners; `tint` is red, green, blue
+/// and alpha from zero to one. A `texture` of zero draws the tint flat,
+/// which is what a filled rectangle is.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created, and `bounds`,
+/// `coords` and `tint` must each point at four readable floats.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_quad(
+    handle: SourceAbiHandle,
+    texture: u32,
+    bounds: *const f32,
+    coords: *const f32,
+    tint: *const f32,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if bounds.is_null() || coords.is_null() || tint.is_null() {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller guarantees four readable floats at each.
+        let read = |values: *const f32| -> [f32; 4] {
+            let values = unsafe { std::slice::from_raw_parts(values, 4) };
+            std::array::from_fn(|slot| values[slot])
+        };
+        let (bounds, coords, tint) = (read(bounds), read(coords), read(tint));
+        // A rectangle with a value that is not a number would reach the
+        // device as one and take the process down, so it is refused here
+        // where the caller can still be told.
+        if [bounds, coords, tint]
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(overlay) = presenters
+                .get_mut(&handle)
+                .and_then(|presenter| presenter.overlay.as_mut())
+            else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            overlay.push(source_materialsystem::Quad {
+                bounds,
+                coords,
+                tint,
+                texture: (texture != 0).then_some(texture),
+            });
+            SOURCE_ABI_OK
+        })
+    })
+}
+
+/// Uploads the gathered rectangles so the next present draws them, and
+/// reports how many there were.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created. `out_quads`, when
+/// not null, must point at writable storage for one `uint64_t`.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_end(
+    handle: SourceAbiHandle,
+    out_quads: *mut u64,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(presenter) = presenters.get_mut(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let (width, height) = presenter.swapchain.size();
+            let device = &presenter.device;
+            let Some(overlay) = presenter.overlay.as_mut() else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            if overlay.upload(device, width as f32, height as f32).is_err() {
+                return SOURCE_ABI_INTERNAL_ERROR;
+            }
+            if !out_quads.is_null() {
+                // SAFETY: the caller guarantees writable storage.
+                unsafe { std::ptr::write(out_quads, overlay.len() as u64) };
+            }
+            SOURCE_ABI_OK
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,3 +730,4 @@ mod tests {
         );
     }
 }
+

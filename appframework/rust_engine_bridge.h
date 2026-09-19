@@ -30,6 +30,19 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT void source_rust_bridge_set_presenter(
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiHandle source_rust_bridge_presenter();
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_scene_load(
 	const char *map, uint64_t mapLength, SourceAbiWorldDraw *drawn);
+// The engine's two-dimensional output, forwarded to the Rust renderer so
+// the interface is composited over the world it draws. Each is a no-op
+// returning failure when no Metal presenter is attached, which is every
+// configuration that still reaches the screen another way.
+extern "C" SOURCE_RUST_BRIDGE_EXPORT bool source_rust_bridge_ui_active();
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_begin();
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_texture(
+	uint32_t id, uint32_t width, uint32_t height, const uint8_t *rgba );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT bool source_rust_bridge_ui_has_texture( uint32_t id );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_quad(
+	uint32_t texture, const float *bounds, const float *coords, const float *tint );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_end( uint64_t *quads );
+
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_scene_present(
 	const float *position, const float *angles, SourceAbiWorldDraw *drawn);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_world_clear();
