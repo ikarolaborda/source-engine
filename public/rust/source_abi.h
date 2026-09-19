@@ -1075,6 +1075,33 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_present(
 	float green,
 	float blue);
 
+/* What a presented frame drew, so a caller can tell a frame with a world in
+ * it from a bare clear without reading the pixels back. */
+typedef struct SourceAbiWorldDraw
+{
+	uint64_t batches;
+	uint64_t triangles;
+	uint64_t map_triangles;
+	uint64_t materials;
+} SourceAbiWorldDraw;
+
+/* Loads a map onto the presenter's device, read through the context's own
+ * content mounts so it resolves as it does for the rest of the engine. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_world_load(
+	SourceAbiHandle handle,
+	SourceAbiHandle context,
+	SourceAbiSlice map,
+	SourceAbiWorldDraw *out_drawn);
+
+/* Draws the loaded map from the engine's own view and presents it.
+ * `position` and `angles` are each three floats, in the engine's units and
+ * its pitch-yaw-roll order. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_world_present(
+	SourceAbiHandle handle,
+	const float *position,
+	const float *angles,
+	SourceAbiWorldDraw *out_drawn);
+
 SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_drawable_size(
 	SourceAbiHandle handle,
 	uint32_t *out_width,

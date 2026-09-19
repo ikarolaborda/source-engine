@@ -913,6 +913,12 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 		if ( status != SOURCE_ABI_OK )
 			Error( "Failed to attach the Metal renderer to the window: status %d", status );
 
+		// Published so the engine's frame loop can draw through it. The
+		// two modules never meet otherwise: the window manager knows the
+		// window and nothing about maps, and the frame loop knows the view
+		// and nothing about how the window was made.
+		source_rust_bridge_set_presenter( m_MetalPresenter );
+
 		uint32_t drawableWidth = 0;
 		uint32_t drawableHeight = 0;
 		source_render_presenter_drawable_size( m_MetalPresenter, &drawableWidth, &drawableHeight );
@@ -2201,6 +2207,7 @@ void CSDLMgr::DestroyGameWindow()
 #if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
 	if ( m_MetalPresenter != 0 )
 	{
+		source_rust_bridge_set_presenter( 0 );
 		source_render_presenter_destroy( m_MetalPresenter );
 		m_MetalPresenter = 0;
 	}

@@ -67,7 +67,11 @@ projects={
 		'launcher',
 		'launcher_main',
 		'materialsystem',
-#		'materialsystem/shaderapiempty',
+		# Built so the engine can boot with no graphics API at all, which
+		# is what -noshaderapi selects. That is the seat the Rust Metal
+		# renderer takes while ToGL is being replaced: the game runs and
+		# nothing creates an OpenGL context.
+		'materialsystem/shaderapiempty',
 		'materialsystem/shaderapidx9',
 		'materialsystem/shaderlib',
 		'materialsystem/stdshaders',

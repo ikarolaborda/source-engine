@@ -270,8 +270,33 @@ visibility set does not describe these surfaces, because the leaves list
 them where they are stored, so a placed model is culled by the leaf it
 stands in rather than by the leaves that list it. Triggers drop out on
 their own, since a surface whose texinfo is not drawn never reaches the
-geometry. Models, particles and UI are not drawn at all, so ToGL is still
-the rendering path and the oracle.
+geometry.
+
+All of that now draws in the running game rather than only in a test, with
+no OpenGL device anywhere in the process. The engine's need for a graphics
+device and its need for one that actually draws turn out to be separate,
+and only the first has to be met for the game to run: under
+`-metal -noshaderapi` the launcher loads `shaderapiempty` instead of
+`shaderapidx9`, so ToGL is never loaded and no GL context is created, and
+the window carries a `CAMetalLayer` rather than a GL surface. The engine's
+frame loop then draws the map through this renderer, where the old renderer
+drew, once per frame with the view it has just set up.
+
+The seam between the two is two calls wide. The engine hands in a position
+and a set of angles and gets back a presented frame; it says nothing about
+batches, lightmaps or culling, and it is asked nothing about entities or
+game state. The map, its materials and its packed lighting are loaded onto
+the Metal device once, and each frame selects from them by the map's own
+visibility set and the view's bounding planes. On `d1_trainstation_01` that
+is 23,999 triangles across 397 bound materials, of which a frame draws
+between 445 and 7,686 depending on where the player is standing.
+
+What a run drew can be kept by setting `SOURCE_METAL_SHOT_DIR`, which
+writes the presented drawable's own pixels rather than a second render of
+the same view, so what is looked at afterwards cannot differ from what was
+shown. Models, particles and UI are still not drawn, and the engine's own
+level-load screen is still the old renderer's; neither reaches the display,
+because the display is the Metal layer.
 
 The pieces a model needs are read, though not yet drawn. `source-studio`
 decodes a model's vertices through the level-of-detail fixup table, which is

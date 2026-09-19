@@ -22,6 +22,16 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT void source_rust_bridge_deactivate(
 	SourceAbiHandle handle);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_world_load(
 	const char *virtualPath, uint64_t virtualPathLength, SourceAbiWorldInfo *info);
+// The Metal presenter attached to the game window, published by the window
+// manager and read by the engine's frame loop. Zero when the window is not
+// Metal-backed, which is every configuration but -metal.
+extern "C" SOURCE_RUST_BRIDGE_EXPORT void source_rust_bridge_set_presenter(
+	SourceAbiHandle presenter);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiHandle source_rust_bridge_presenter();
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_scene_load(
+	const char *map, uint64_t mapLength, SourceAbiWorldDraw *drawn);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_scene_present(
+	const float *position, const float *angles, SourceAbiWorldDraw *drawn);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_world_clear();
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_read_file(
 	const char *virtualPath, uint64_t virtualPathLength, const char *pathId,

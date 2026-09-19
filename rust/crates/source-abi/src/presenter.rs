@@ -29,6 +29,10 @@ struct Presenter {
     /// changes when the window is dragged between displays without its
     /// size in points changing at all.
     window: *mut c_void,
+    /// The map being drawn, once one has been loaded onto this presenter's
+    /// device. A presenter without one still presents, as a clear, which
+    /// is what the frames before a map loads are.
+    scene: Option<source_materialsystem::Scene>,
 }
 
 #[cfg(target_os = "macos")]
@@ -102,6 +106,7 @@ pub unsafe extern "C" fn source_render_presenter_create(
                         device,
                         swapchain,
                         window,
+                        scene: None,
                     },
                 )
             });
@@ -192,10 +197,159 @@ pub unsafe extern "C" fn source_render_presenter_resize(
     })
 }
 
+/// What a presented frame drew, so a caller can tell a frame with a world
+/// in it from a bare clear without reading the pixels back.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SourceAbiWorldDraw {
+    /// Draw calls issued, which is one per material with visible surfaces.
+    pub batches: u64,
+    /// Triangles those draws covered.
+    pub triangles: u64,
+    /// Triangles the whole map holds, which is what the view selected from.
+    pub map_triangles: u64,
+    /// Materials that resolved to a texture when the map was loaded.
+    pub materials: u64,
+}
+
+/// Loads a map onto a presenter's device, ready to be drawn.
+///
+/// The map is read through `context`'s own content mounts, so it resolves
+/// exactly as it does for the rest of the engine, and the map's embedded
+/// archive is mounted as part of loading it.
+///
+/// # Safety
+/// Must be called on the thread that created the presenter. `map` must
+/// describe readable bytes, and `out_drawn`, when not null, must point at
+/// writable storage for one [`SourceAbiWorldDraw`].
+#[no_mangle]
+pub unsafe extern "C" fn source_render_world_load(
+    handle: SourceAbiHandle,
+    context: SourceAbiHandle,
+    map: crate::SourceAbiSlice,
+    out_drawn: *mut SourceAbiWorldDraw,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        // SAFETY: the caller guarantees the slice describes readable bytes.
+        let map = match unsafe { crate::read_utf8_slice(map) } {
+            Ok(map) => map,
+            Err(status) => return status,
+        };
+        let Some(filesystem) = crate::context_filesystem(context) else {
+            return SOURCE_ABI_INVALID_HANDLE;
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (handle, filesystem, out_drawn);
+            SOURCE_ABI_INTERNAL_ERROR
+        }
+
+        #[cfg(target_os = "macos")]
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(presenter) = presenters.get_mut(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let mut paths = filesystem
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let scene = match source_materialsystem::Scene::load(&presenter.device, &mut paths, map)
+            {
+                Ok(scene) => scene,
+                Err(_) => return SOURCE_ABI_INTERNAL_ERROR,
+            };
+            if !out_drawn.is_null() {
+                let drawn = SourceAbiWorldDraw {
+                    batches: 0,
+                    triangles: 0,
+                    map_triangles: scene.triangle_count() as u64,
+                    materials: scene.bound_materials() as u64,
+                };
+                // SAFETY: the caller guarantees writable storage.
+                unsafe { std::ptr::write(out_drawn, drawn) };
+            }
+            presenter.scene = Some(scene);
+            SOURCE_ABI_OK
+        })
+    })
+}
+
+/// Draws the loaded map from where the player is standing and presents it.
+///
+/// `position` and `angles` are the engine's own view, in its own units and
+/// its own pitch-yaw-roll order, so the caller passes what it already has
+/// rather than building a matrix the renderer would only take apart again.
+///
+/// # Safety
+/// Must be called on the thread that created the presenter. `position` and
+/// `angles` must each point at three readable floats, and `out_drawn`,
+/// when not null, at writable storage for one [`SourceAbiWorldDraw`].
+#[no_mangle]
+pub unsafe extern "C" fn source_render_world_present(
+    handle: SourceAbiHandle,
+    position: *const f32,
+    angles: *const f32,
+    out_drawn: *mut SourceAbiWorldDraw,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if position.is_null() || angles.is_null() {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller guarantees three readable floats at each.
+        let (position, angles) = unsafe {
+            (
+                [*position, *position.add(1), *position.add(2)],
+                [*angles, *angles.add(1), *angles.add(2)],
+            )
+        };
+        // A view that is not a number reaches Metal as a matrix it cannot
+        // build, so it is refused here rather than presenting a frame of
+        // whatever the arithmetic produced.
+        if !position.iter().chain(angles.iter()).all(|v| v.is_finite()) {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (handle, out_drawn);
+            SOURCE_ABI_INVALID_HANDLE
+        }
+
+        #[cfg(target_os = "macos")]
+        PRESENTERS.with(|presenters| {
+            let presenters = presenters.borrow();
+            let Some(presenter) = presenters.get(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let Some(scene) = presenter.scene.as_ref() else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let eye = source_render::Eye { position, angles };
+            match scene.present(&presenter.device, &presenter.swapchain, eye) {
+                Ok(drawn) => {
+                    if !out_drawn.is_null() {
+                        let drawn = SourceAbiWorldDraw {
+                            batches: drawn.batches as u64,
+                            triangles: (drawn.indices / 3) as u64,
+                            map_triangles: scene.triangle_count() as u64,
+                            materials: scene.bound_materials() as u64,
+                        };
+                        // SAFETY: the caller guarantees writable storage.
+                        unsafe { std::ptr::write(out_drawn, drawn) };
+                    }
+                    SOURCE_ABI_OK
+                }
+                Err(_) => SOURCE_ABI_INTERNAL_ERROR,
+            }
+        })
+    })
+}
+
 /// Draws and presents one frame.
 ///
-/// Only a clear for now, which is what proves the window is Metal-backed
-/// and being presented into at all. The scene goes here.
+/// A bare clear, which is what the frames before a map loads are. Once a
+/// map is loaded, [`source_render_world_present`] draws it.
 ///
 /// # Safety
 /// Must be called on the thread that created the presenter.

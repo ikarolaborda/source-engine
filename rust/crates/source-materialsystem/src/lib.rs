@@ -12,6 +12,10 @@
 //! Metal. Only the formats Metal has no equivalent for are converted, and
 //! each of those conversions is named below.
 
+pub mod world;
+
+pub use world::Scene;
+
 use source_filesystem::SearchPaths;
 use source_material::Material;
 use source_render::{Device, Texture, TextureFormat};

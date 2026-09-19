@@ -2291,7 +2291,7 @@ impl AmbientLighting {
     /// carries, placed at the middle of the leaf because that record says
     /// nothing about where in the leaf it was measured.
     fn from_leaves(bytes: &[u8]) -> Result<Self> {
-        if !bytes.len().is_multiple_of(LEAF_V0_SIZE) {
+        if bytes.len() % LEAF_V0_SIZE != 0 {
             return Err(Error::InvalidLumpLength {
                 lump: LUMP_LEAVES,
                 length: bytes.len(),
@@ -2299,12 +2299,12 @@ impl AmbientLighting {
         }
         let mut samples = Vec::with_capacity(bytes.len() / LEAF_V0_SIZE);
         let mut index = Vec::with_capacity(bytes.len() / LEAF_V0_SIZE);
-        for (leaf, record) in bytes.as_chunks::<LEAF_V0_SIZE>().0.iter().enumerate() {
+        for (leaf, record) in bytes.chunks_exact(LEAF_V0_SIZE).enumerate() {
             // The cube sits after the thirty bytes a version-1 leaf is,
             // and before the two of padding that end the record.
             let cube = &record[30..54];
             let mut faces = [[0.0f32; 3]; 6];
-            for (face, stored) in faces.iter_mut().zip(cube.as_chunks::<4>().0) {
+            for (face, stored) in faces.iter_mut().zip(cube.chunks_exact(4)) {
                 *face = decode_light(stored);
             }
             index.push((leaf, 1));
@@ -2321,13 +2321,13 @@ impl AmbientLighting {
     }
 
     fn from_lumps(lighting: &[u8], index: &[u8], hdr: bool) -> Result<Self> {
-        if !lighting.len().is_multiple_of(AMBIENT_SAMPLE_SIZE) {
+        if lighting.len() % AMBIENT_SAMPLE_SIZE != 0 {
             return Err(Error::InvalidLumpLength {
                 lump: LUMP_LEAF_AMBIENT_LIGHTING,
                 length: lighting.len(),
             });
         }
-        if !index.len().is_multiple_of(AMBIENT_INDEX_SIZE) {
+        if index.len() % AMBIENT_INDEX_SIZE != 0 {
             return Err(Error::InvalidLumpLength {
                 lump: LUMP_LEAF_AMBIENT_INDEX,
                 length: index.len(),
@@ -2335,9 +2335,9 @@ impl AmbientLighting {
         }
 
         let mut samples = Vec::with_capacity(lighting.len() / AMBIENT_SAMPLE_SIZE);
-        for record in lighting.as_chunks::<AMBIENT_SAMPLE_SIZE>().0 {
+        for record in lighting.chunks_exact(AMBIENT_SAMPLE_SIZE) {
             let mut faces = [[0.0f32; 3]; 6];
-            for (face, stored) in faces.iter_mut().zip(record.as_chunks::<4>().0) {
+            for (face, stored) in faces.iter_mut().zip(record.chunks_exact(4)) {
                 *face = decode_light(stored);
             }
             samples.push(AmbientSample {
@@ -2347,7 +2347,7 @@ impl AmbientLighting {
         }
 
         let mut entries = Vec::with_capacity(index.len() / AMBIENT_INDEX_SIZE);
-        for record in index.as_chunks::<AMBIENT_INDEX_SIZE>().0 {
+        for record in index.chunks_exact(AMBIENT_INDEX_SIZE) {
             let count = usize::from(u16::from_le_bytes([record[0], record[1]]));
             let first = usize::from(u16::from_le_bytes([record[2], record[3]]));
             // A leaf pointing past the samples would silently light

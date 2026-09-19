@@ -284,9 +284,40 @@ parity.
    from edges belonging to geometry that lives in another lump.
    `d1_trainstation_01` has three, which is why nothing looked obviously
    wrong.
-4. Add studio models, skinning, facial morphs, decals, particles, water, and
+4. The renderer draws the running game, with no OpenGL device in the
+   process at all. `-metal -noshaderapi` is the configuration: the launcher
+   selects `shaderapiempty` instead of `shaderapidx9`, so nothing loads
+   ToGL and nothing creates a GL context, and the window manager attaches a
+   `CAMetalLayer` to the engine's own `NSWindow` instead of a GL surface.
+   The engine's frame loop then draws the map through the Rust renderer,
+   where the old renderer drew, once per frame with the view it has just
+   set up.
+
+   What made this possible is that the engine's dependence on a graphics
+   device and its dependence on one that *draws* are separate. `shaderapiempty`
+   satisfies the first and nothing satisfies the second, which is exactly
+   the gap the Rust renderer fills. The map, its materials and its lighting
+   are loaded onto the Metal device once, and each frame selects from them
+   by the map's own visibility set and the view's bounding planes.
+
+   The seam between the two sides is deliberately narrow. The engine hands
+   in a position and a set of angles and gets back a presented frame; it
+   says nothing about batches, lightmaps or culling, and the renderer asks
+   nothing about entities or game state. `source_render_world_load` and
+   `source_render_world_present` are the whole of it.
+
+   On `d1_trainstation_01` this loads 23,999 triangles across 397 bound
+   materials, and a frame draws between 445 and 7,686 of them depending on
+   where the player is standing. Runs can be asked to keep what they drew
+   with `SOURCE_METAL_SHOT_DIR`, which writes the presented drawable's own
+   pixels rather than a second render of the same view.
+
+   Two things are still the old renderer's: the engine's own level-load
+   screen, and everything drawn on top of the world. Neither reaches the
+   display, because the display is the Metal layer.
+5. Add studio models, skinning, facial morphs, decals, particles, water, and
    shadows; the G-Man intro lip-sync gate is an explicit morph regression.
-5. Move VGUI/HUD composition and post-processing to the Metal render graph,
+6. Move VGUI/HUD composition and post-processing to the Metal render graph,
    then retire ToGL after campaign-wide visual and stability gates pass.
 
 ## Required gates

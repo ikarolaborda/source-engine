@@ -6,6 +6,46 @@
 namespace
 {
 std::atomic<SourceAbiHandle> g_ActiveRustEngineHandle( 0 );
+
+// The Metal presenter attached to the game window, published here by the
+// window manager so the engine's frame loop can reach it without the two
+// modules having to know about each other. Zero until a window is created
+// with -metal, and zero again once it is destroyed, which is what the
+// frame loop tests to decide whether it has anywhere to draw.
+std::atomic<SourceAbiHandle> g_MetalPresenterHandle( 0 );
+}
+
+extern "C" void source_rust_bridge_set_presenter( SourceAbiHandle presenter )
+{
+	g_MetalPresenterHandle.store( presenter, std::memory_order_release );
+}
+
+extern "C" SourceAbiHandle source_rust_bridge_presenter()
+{
+	return g_MetalPresenterHandle.load( std::memory_order_acquire );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_scene_load( const char *map,
+	uint64_t mapLength, SourceAbiWorldDraw *drawn )
+{
+	const SourceAbiHandle context = g_ActiveRustEngineHandle.load( std::memory_order_acquire );
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( context == 0 || presenter == 0 || map == 0 )
+		return SOURCE_ABI_INVALID_ARGUMENT;
+
+	SourceAbiSlice mapSlice;
+	mapSlice.data = reinterpret_cast<const uint8_t *>( map );
+	mapSlice.length = mapLength;
+	return source_render_world_load( presenter, context, mapSlice, drawn );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_scene_present( const float *position,
+	const float *angles, SourceAbiWorldDraw *drawn )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return SOURCE_ABI_INVALID_ARGUMENT;
+	return source_render_world_present( presenter, position, angles, drawn );
 }
 
 extern "C" SourceAbiStatus source_rust_bridge_activate( SourceAbiHandle handle )

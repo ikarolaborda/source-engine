@@ -801,6 +801,17 @@ fn snapshot_summary(summary: source_net::SnapshotSummary) -> SourceAbiSnapshotSu
     }
 }
 
+/// The content mounts a context has built, shared rather than copied so
+/// that a renderer reads a map through the same ordered search path the
+/// rest of the engine does, including any archive mounted after it started.
+fn context_filesystem(
+    handle: SourceAbiHandle,
+) -> Option<Arc<Mutex<source_filesystem::SearchPaths>>> {
+    lock_contexts()
+        .get(&handle)
+        .map(|context| Arc::clone(&context.filesystem))
+}
+
 unsafe fn read_utf8_slice<'a>(slice: SourceAbiSlice) -> Result<&'a str, SourceAbiStatus> {
     let bytes = unsafe { read_slice(slice) }?;
     if bytes.is_empty() {

@@ -13,6 +13,7 @@ dependencies = [
  "source-filesystem",
  "source-host",
  "source-input",
+ "source-materialsystem",
  "source-net",
  "source-render",
  "source-save",

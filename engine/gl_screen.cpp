@@ -31,6 +31,9 @@
 #include "replay_internal.h"
 #endif
 #include "tier0/vprof.h"
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+#include "../appframework/rust_engine_bridge.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -205,6 +208,85 @@ inline void SCR_ShowVCRPlaybackAmount()
 	Con_NXPrintf( &info, "'q' to quit" );
 }
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+//-----------------------------------------------------------------------------
+// Purpose: Draws the map through the Rust Metal renderer.
+//
+//  This runs where the old renderer ran, once per frame with the engine's
+//  view already set up. The renderer loaded the map itself, so all it is
+//  given is where the player is looking from; what of the map that reaches
+//  is the renderer's own decision.
+//
+//  The map is loaded on the first frame of a level rather than at load
+//  time, because that is the earliest point at which both the level file
+//  name and the presenter are certain to exist.
+//-----------------------------------------------------------------------------
+static void SCR_PresentRustWorld( void )
+{
+	if ( source_rust_bridge_presenter() == 0 )
+		return;
+
+	// The server's own world model, rather than the client's level file
+	// name: the name is what the client displays on its scoreboard and is
+	// empty until it has parsed the server info, while the world model is
+	// set as the level loads, which is when there is something to draw.
+	if ( host_state.worldmodel == NULL )
+		return;
+	const char *level = modelloader->GetName( host_state.worldmodel );
+	if ( !level || !level[ 0 ] )
+		return;
+
+	static char s_LoadedMap[ 128 ] = { 0 };
+	static bool s_SceneReady = false;
+	SourceAbiWorldDraw drawn = {};
+	if ( Q_stricmp( s_LoadedMap, level ) != 0 )
+	{
+		// Recorded before the attempt so that a map which cannot be loaded
+		// is reported once rather than on every frame of the level.
+		Q_strncpy( s_LoadedMap, level, sizeof( s_LoadedMap ) );
+		const SourceAbiStatus status = source_rust_bridge_scene_load( level,
+			Q_strlen( level ), &drawn );
+		s_SceneReady = ( status == SOURCE_ABI_OK );
+		if ( !s_SceneReady )
+		{
+			Warning( "Rust Metal scene load failed for %s (status %d)\n", level, status );
+			return;
+		}
+		Msg( "Rust Metal scene: %llu triangles, %llu materials (%s)\n",
+			(unsigned long long)drawn.map_triangles,
+			(unsigned long long)drawn.materials, level );
+	}
+	if ( !s_SceneReady )
+		return;
+
+	// The last view the engine set up, which is the one just rendered. The
+	// accessors in render.h assert on being inside a view push, and this
+	// runs just after one has been popped.
+	extern Vector g_CurrentViewOrigin;
+	extern Vector g_CurrentViewForward;
+	QAngle viewAngles;
+	VectorAngles( g_CurrentViewForward, viewAngles );
+	const float position[ 3 ] = { g_CurrentViewOrigin.x, g_CurrentViewOrigin.y,
+		g_CurrentViewOrigin.z };
+	const float angles[ 3 ] = { viewAngles.x, viewAngles.y, viewAngles.z };
+	source_rust_bridge_scene_present( position, angles, &drawn );
+
+	// One line a second rather than one a frame, which is enough to show
+	// the view moving and what it costs without filling the log.
+	static double s_NextReport = 0.0;
+	const double now = Plat_FloatTime();
+	if ( now >= s_NextReport )
+	{
+		s_NextReport = now + 1.0;
+		Msg( "RUST_METAL_FRAME batches=%llu triangles=%llu of=%llu eye=%.0f %.0f %.0f "
+			"angles=%.0f %.0f\n",
+			(unsigned long long)drawn.batches, (unsigned long long)drawn.triangles,
+			(unsigned long long)drawn.map_triangles, position[ 0 ], position[ 1 ],
+			position[ 2 ], angles[ 0 ], angles[ 1 ] );
+	}
+}
+#endif
+
 //-----------------------------------------------------------------------------
 // Purpose: This is called every frame, and can also be called explicitly to flush
 //  text to the screen.
@@ -276,6 +358,10 @@ void SCR_UpdateScreen( void )
 				
 	// Draw world, etc.
 	V_RenderView();
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	SCR_PresentRustWorld();
+#endif
 
 	CL_TakeSnapshotAndSwap();	   
 	
