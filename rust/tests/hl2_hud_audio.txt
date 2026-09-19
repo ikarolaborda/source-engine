@@ -35,6 +35,21 @@ soundinfo
 sv_cheats
 cl_hud_validate
 snd_validate
+// `PlayerRunCommand` throws away a command's impulse outright while
+// `developer` is 0, the load is a new game and the server's clock is under
+// three seconds, which is the engine holding the player still for a moment
+// after a level starts. The checkpoint above does not clear that window,
+// because it says the client is connected rather than that the server has
+// begun simulating, and the server starts ticking about ten seconds later
+// with no shader API: measured at this line, its clock reads 6.0 seconds
+// with the legacy renderer but 1.4 without one, so the same script loses the
+// impulse on one path and not the other. Waiting earlier does not help, since
+// the server's start slides along with it; the wait has to sit here, after
+// the clock is known to be running. An impulse lost this way is lost in
+// silence: the suit is never equipped, every element carrying
+// HIDEHUD_NEEDSUIT declines to draw, and the gate fails on a HUD that was
+// never allowed to appear rather than on anything it drew.
+Test_Wait 8
 // Equipping the suit brings up the aux-power element; the SMG brings up ammo.
 impulse 101
 Test_Wait 2

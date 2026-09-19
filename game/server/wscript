@@ -68,6 +68,8 @@ def build(bld):
 	defines = game["defines"]
 
 	defines.remove('PROTECTED_THINGS_ENABLE')
+	if bld.env.RUST_ENGINE:
+		defines = defines + ['SOURCE_RUST_ENGINE=1']
 
 	bld.shlib(
 		source   = source,
