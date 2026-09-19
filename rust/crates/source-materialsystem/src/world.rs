@@ -562,7 +562,6 @@ impl Scene {
             Err(_) => self.geometry.batches.clone(),
         };
 
-
         let frustum = Frustum::new(transform.frustum_planes());
         let mut draws: Vec<TriangleList<'_>> = batches
             .iter()
@@ -669,7 +668,20 @@ impl Scene {
         // nothing may record the display. These are the presented
         // drawable's own pixels rather than a second render of the same
         // view, so they cannot differ from what was shown.
+        //
+        // `SOURCE_METAL_SHOT_EVERY` says to keep one frame in so many
+        // rather than the first few. The first few are whatever the run
+        // happens to be showing seconds after a map loads, which is not
+        // when a scenario has done anything yet, so a question about what
+        // the run ends up drawing cannot be answered from them.
+        let presents = PRESENTS_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let every = std::env::var("SOURCE_METAL_SHOT_EVERY")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|every| *every > 0)
+            .unwrap_or(1);
         let recording = std::env::var_os("SOURCE_METAL_SHOT_DIR")
+            .filter(|_| presents % every == 0)
             .filter(|_| SHOTS_TAKEN.load(std::sync::atomic::Ordering::Relaxed) < MOST_SHOTS_KEPT);
         if let Some(directory) = recording {
             let frame = self
@@ -719,8 +731,7 @@ impl Scene {
     /// The triangles the whole map holds, which is what a frame draws
     /// from: its world and brush models, plus every prop it places.
     pub fn triangle_count(&self) -> usize {
-        self.geometry.indices.len() / 3
-            + self.props.as_ref().map_or(0, Props::triangle_count)
+        self.geometry.indices.len() / 3 + self.props.as_ref().map_or(0, Props::triangle_count)
     }
 
     /// How many placements of a prop the map draws, which is zero where it
@@ -737,6 +748,9 @@ impl Scene {
 
 /// How many frames a recording run has kept, so each lands in its own file.
 static SHOTS_TAKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many frames have been presented, so a recording can keep one in
+/// so many rather than only the first.
+static PRESENTS_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Reading a frame back waits for the GPU, so a run that recorded every
 /// frame would no longer be running at the speed it is meant to measure.

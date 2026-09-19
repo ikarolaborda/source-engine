@@ -94,6 +94,19 @@ pub struct Overlay {
     frame: Option<Frame>,
 }
 
+/// The part of a texture an update covers, in texels from its top left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Texels from the left edge of the texture.
+    pub x: u32,
+    /// Texels from the top edge of the texture.
+    pub y: u32,
+    /// Width of the update in texels.
+    pub width: u32,
+    /// Height of the update in texels.
+    pub height: u32,
+}
+
 /// A texture's pixels as the engine last left them, in the order the
 /// device stores them.
 struct Sheet {
@@ -194,12 +207,15 @@ impl Overlay {
         &mut self,
         device: &Device,
         id: u32,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
+        region: Region,
         rgba: &[u8],
     ) -> Result<(), Error> {
+        let Region {
+            x,
+            y,
+            width,
+            height,
+        } = region;
         let expected = (width as usize) * (height as usize) * 4;
         if rgba.len() < expected {
             return Err(Error::ShortTexture {

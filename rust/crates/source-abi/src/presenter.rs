@@ -448,6 +448,34 @@ pub unsafe extern "C" fn source_render_presenter_drawable_size(
     })
 }
 
+#[cfg(target_os = "macos")]
+impl Presenter {
+    /// The overlay, made if this is the first thing to want it.
+    ///
+    /// It is made on demand rather than with the presenter so a run that
+    /// never draws an interface does not pay for a pipeline and a texture
+    /// it will not use. It has to be on demand from *every* caller rather
+    /// than from the frame boundary alone, because the engine rasterises
+    /// its font sheets while the level loads, which is long before the
+    /// first frame is presented; creating it only at the frame boundary
+    /// silently discarded every sheet the HUD would later draw text from.
+    fn overlay_mut(
+        &mut self,
+    ) -> Result<(&source_render::Device, &mut source_materialsystem::Overlay), SourceAbiStatus>
+    {
+        if self.overlay.is_none() {
+            match source_materialsystem::Overlay::new(&self.device) {
+                Ok(overlay) => self.overlay = Some(overlay),
+                Err(_) => return Err(SOURCE_ABI_INTERNAL_ERROR),
+            }
+        }
+        let Some(overlay) = self.overlay.as_mut() else {
+            return Err(SOURCE_ABI_INTERNAL_ERROR);
+        };
+        Ok((&self.device, overlay))
+    }
+}
+
 /// Discards the two-dimensional output gathered so far, which is how a
 /// frame's interface starts.
 ///
@@ -467,16 +495,13 @@ pub unsafe extern "C" fn source_render_ui_begin(handle: SourceAbiHandle) -> Sour
             let Some(presenter) = presenters.get_mut(&handle) else {
                 return SOURCE_ABI_INVALID_HANDLE;
             };
-            if presenter.overlay.is_none() {
-                match source_materialsystem::Overlay::new(&presenter.device) {
-                    Ok(overlay) => presenter.overlay = Some(overlay),
-                    Err(_) => return SOURCE_ABI_INTERNAL_ERROR,
+            match presenter.overlay_mut() {
+                Ok((_, overlay)) => {
+                    overlay.clear();
+                    SOURCE_ABI_OK
                 }
+                Err(status) => status,
             }
-            if let Some(overlay) = presenter.overlay.as_mut() {
-                overlay.clear();
-            }
-            SOURCE_ABI_OK
         })
     })
 }
@@ -515,9 +540,9 @@ pub unsafe extern "C" fn source_render_ui_texture(
             let Some(presenter) = presenters.get_mut(&handle) else {
                 return SOURCE_ABI_INVALID_HANDLE;
             };
-            let device = &presenter.device;
-            let Some(overlay) = presenter.overlay.as_mut() else {
-                return SOURCE_ABI_INVALID_HANDLE;
+            let (device, overlay) = match presenter.overlay_mut() {
+                Ok(pair) => pair,
+                Err(status) => return status,
             };
             match overlay.set_texture(device, id, width, height, pixels) {
                 Ok(()) => SOURCE_ABI_OK,
@@ -566,11 +591,17 @@ pub unsafe extern "C" fn source_render_ui_texture_region(
             let Some(presenter) = presenters.get_mut(&handle) else {
                 return SOURCE_ABI_INVALID_HANDLE;
             };
-            let device = &presenter.device;
-            let Some(overlay) = presenter.overlay.as_mut() else {
-                return SOURCE_ABI_INVALID_HANDLE;
+            let (device, overlay) = match presenter.overlay_mut() {
+                Ok(pair) => pair,
+                Err(status) => return status,
             };
-            match overlay.set_sub_texture(device, id, x, y, width, height, pixels) {
+            let region = source_materialsystem::Region {
+                x,
+                y,
+                width,
+                height,
+            };
+            match overlay.set_sub_texture(device, id, region, pixels) {
                 Ok(()) => SOURCE_ABI_OK,
                 Err(_) => SOURCE_ABI_INTERNAL_ERROR,
             }
@@ -596,11 +627,12 @@ pub unsafe extern "C" fn source_render_ui_texture_alias(
     ffi_status(|| {
         PRESENTERS.with(|presenters| {
             let mut presenters = presenters.borrow_mut();
-            let Some(overlay) = presenters
-                .get_mut(&handle)
-                .and_then(|presenter| presenter.overlay.as_mut())
-            else {
+            let Some(presenter) = presenters.get_mut(&handle) else {
                 return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let overlay = match presenter.overlay_mut() {
+                Ok((_, overlay)) => overlay,
+                Err(status) => return status,
             };
             overlay.alias(alias, base);
             SOURCE_ABI_OK
@@ -826,4 +858,3 @@ mod tests {
         );
     }
 }
-

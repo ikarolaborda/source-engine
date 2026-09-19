@@ -15,7 +15,7 @@
 pub mod overlay;
 mod world;
 
-pub use overlay::{Overlay, Quad};
+pub use overlay::{Overlay, Quad, Region};
 pub use world::Scene;
 
 use source_filesystem::SearchPaths;

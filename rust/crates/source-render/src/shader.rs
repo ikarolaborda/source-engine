@@ -151,15 +151,8 @@ pub(crate) unsafe fn build_pipeline(
             // is already there. This is what a user interface is drawn
             // with, because a glyph is a coverage mask rather than a
             // rectangle of colour and a panel is frequently translucent.
-            crate::objc::send_void_with_usize(
-                attachment,
-                selector(c"setBlendingEnabled:"),
-                1,
-            );
-            for setter in [
-                c"setSourceRGBBlendFactor:",
-                c"setSourceAlphaBlendFactor:",
-            ] {
+            crate::objc::send_void_with_usize(attachment, selector(c"setBlendingEnabled:"), 1);
+            for setter in [c"setSourceRGBBlendFactor:", c"setSourceAlphaBlendFactor:"] {
                 crate::objc::send_void_with_usize(
                     attachment,
                     selector(setter),
