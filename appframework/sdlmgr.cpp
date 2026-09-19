@@ -919,6 +919,19 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 		// and nothing about how the window was made.
 		source_rust_bridge_set_presenter( m_MetalPresenter );
 
+		// The size anything rendering into this window draws at. It was
+		// only ever latched from inside ToGL, so with no OpenGL context
+		// it stayed at the zero it starts as, and that zero does not stay
+		// put: the engine sets the material system's viewport from it
+		// every frame, and sizes VGUI's root panel from that viewport, so
+		// the whole interface was laid out inside a rectangle of no size.
+		// This window knows how big it is whoever is drawing into it.
+		{
+			uint renderedWidth = (uint)scaledWidth;
+			uint renderedHeight = (uint)scaledHeight;
+			RenderedSize( renderedWidth, renderedHeight, true );
+		}
+
 		uint32_t drawableWidth = 0;
 		uint32_t drawableHeight = 0;
 		source_render_presenter_drawable_size( m_MetalPresenter, &drawableWidth, &drawableHeight );
