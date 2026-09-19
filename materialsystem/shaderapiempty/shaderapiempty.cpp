@@ -12,6 +12,7 @@
 #include "shadersystem.h"
 #include "shaderapi/ishaderutil.h"
 #include "shaderapi/ishaderapi.h"
+#include "tier0/icommandline.h"
 #include "materialsystem/imesh.h"
 #include "tier0/dbg.h"
 #include "materialsystem/idebugtextureinfo.h"
@@ -318,9 +319,24 @@ public:
 
 	virtual char *GetDisplayDeviceName() OVERRIDE { return ""; }
 
+	// The size the device was asked for, which is the size of the window
+	// something else is drawing into. This device draws nothing, but it
+	// is still the only thing the rest of the engine asks how big the
+	// screen is, and VGUI lays every panel out against the answer.
+	void SetWindowSize( int width, int height )
+	{
+		if ( width > 0 && height > 0 )
+		{
+			m_WindowWidth = width;
+			m_WindowHeight = height;
+		}
+	}
+
 private:
 	CEmptyMesh m_Mesh;
 	CEmptyMesh m_DynamicMesh;
+	int m_WindowWidth = 1024;
+	int m_WindowHeight = 768;
 };
 
 static CShaderDeviceEmpty s_ShaderDeviceEmpty;
@@ -1343,6 +1359,9 @@ bool CShaderDeviceMgrEmpty::SetAdapter( int nAdapter, int nFlags )
 // FIXME: Is this a public interface? Might only need to be private to shaderapi
 CreateInterfaceFn CShaderDeviceMgrEmpty::SetMode( void *hWnd, int nAdapter, const ShaderDeviceInfo_t& mode ) 
 {
+	// Remember what was asked for, so the getters above answer with the
+	// window that exists rather than with a built-in default.
+	s_ShaderDeviceEmpty.SetWindowSize( mode.m_DisplayMode.m_nWidth, mode.m_DisplayMode.m_nHeight );
 	return ShaderInterfaceFactory;
 }
 
@@ -1387,14 +1406,20 @@ void CShaderDeviceMgrEmpty::GetCurrentModeInfo( ShaderDisplayMode_t* pInfo, int 
 //-----------------------------------------------------------------------------
 void CShaderDeviceEmpty::GetWindowSize( int &width, int &height ) const
 {
-	width = 0;
-	height = 0;
+	// Reporting no size at all was safe while this device existed only so
+	// the engine could run with nothing on the screen. It is not safe now
+	// that something else draws: VGUI sizes its root panel from this, so
+	// zero collapses every panel to nothing, and the interface is laid
+	// out, clipped and thrown away rather than drawn. Nothing reports an
+	// error, because a panel of no size has nothing to fail at.
+	width = m_WindowWidth;
+	height = m_WindowHeight;
 }
 
 void CShaderDeviceEmpty::GetBackBufferDimensions( int& width, int& height ) const
 {
-	width = 1024;
-	height = 768;
+	width = m_WindowWidth;
+	height = m_WindowHeight;
 }
 
 // Use this to spew information about the 3D layer 
