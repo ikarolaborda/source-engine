@@ -624,6 +624,21 @@ static void OverrideMaterialSystemConfigFromCommandLine( MaterialSystem_Config_t
 		config.m_VideoMode.m_Height = CommandLine()->ParmValue( "-h", config.m_VideoMode.m_Height );
 	}
 
+	// -nativeres renders at the display's own pixel count, whatever display
+	// the game is started on. The adapter's current mode is that count: on a
+	// display whose points are not pixels it is the pixels, which the desktop
+	// size the window manager reports is not.
+	if ( CommandLine()->FindParm( "-nativeres" ) )
+	{
+		MaterialVideoMode_t nativeMode;
+		materials->GetDisplayMode( nativeMode );
+		if ( nativeMode.m_Width > 0 && nativeMode.m_Height > 0 )
+		{
+			config.m_VideoMode.m_Width = nativeMode.m_Width;
+			config.m_VideoMode.m_Height = nativeMode.m_Height;
+		}
+	}
+
 #if defined( USE_SDL ) && !defined( SWDS )
 	// If -displayindex was specified on the command line, then set sdl_displayindex.
 	if ( CommandLine()->FindParm( "-displayindex" ) )

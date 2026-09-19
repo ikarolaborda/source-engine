@@ -520,6 +520,10 @@ def configure(conf):
 	elif conf.env.GL:
 		projects['game'] += ['togl']
 
+	# Direct3D 9 on Metal, which shaderapimetal is built against.
+	if conf.env.RUST_ENGINE and conf.env.DEST_OS == 'darwin':
+		projects['game'] += ['tometal']
+
 	if conf.env.DEST_OS == 'win32':
 		projects['game'] += ['utils/bzip2']
 		projects['dedicated'] += ['utils/bzip2']
@@ -710,5 +714,8 @@ def build(bld):
 			projects['game'] += ['togles']
 		elif bld.env.GL:
 			projects['game'] += ['togl']
+
+		if bld.env.RUST_ENGINE and bld.env.DEST_OS == 'darwin':
+			projects['game'] += ['tometal']
 
 		bld.add_subproject(projects['game'])

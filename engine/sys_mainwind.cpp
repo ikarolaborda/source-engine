@@ -918,7 +918,13 @@ bool CGame::CreateGameWindow( void )
 		Q_strncpy( windowName, "HALF-LIFE 2", sizeof(windowName) );
 	}
 
-	if ( IsOpenGL() )
+	// -metal draws through Direct3D 9 on Metal and creates no OpenGL context,
+	// so the title should not say it does.
+	if ( CommandLine()->FindParm( "-metal" ) )
+	{
+		V_strcat( windowName, " - Metal", sizeof( windowName ) );
+	}
+	else if ( IsOpenGL() )
 	{
 #ifdef TOGLES
 		V_strcat( windowName, " - OpenGLES", sizeof( windowName ) );

@@ -1193,7 +1193,7 @@ inline int CIndexBufferDx8::IndexSize() const
 //-----------------------------------------------------------------------------
 bool CIndexBufferDx8::Allocate()
 {
-#ifdef OSX
+#if defined( OSX ) && !defined( TOMETAL )
 	Debugger();
 #endif
 	Assert( !m_pIndexBuffer );

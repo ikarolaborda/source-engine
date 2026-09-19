@@ -9,6 +9,7 @@ use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+mod d3d9;
 mod presenter;
 pub use presenter::*;
 

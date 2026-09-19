@@ -89,3 +89,20 @@ def build(bld):
 		idx      = bld.get_taskgen_count()
 	)
 
+	# The same shader API over Direct3D 9 on Metal instead of ToGL. It is the
+	# same sources against the same Direct3D classes; only what those classes
+	# are made of differs, which TOMETAL selects in togl/rendermechanism.h.
+	if bld.env.RUST_ENGINE and bld.env.DEST_OS == 'darwin':
+		metal_libs = [lib for lib in libs if lib != 'togl'] + ['tometal']
+		bld.shlib(
+			source   = source,
+			target   = 'shaderapimetal',
+			name     = 'shaderapimetal',
+			features = 'c cxx',
+			includes = includes,
+			defines  = defines + ['TOMETAL=1'],
+			use      = metal_libs,
+			install_path = install_path,
+			subsystem = bld.env.MSVC_SUBSYSTEM,
+			idx      = bld.get_taskgen_count()
+		)

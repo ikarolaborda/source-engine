@@ -1,0 +1,46 @@
+#! /usr/bin/env python
+# encoding: utf-8
+
+# Direct3D 9 on Metal: the classes shaderapimetal is compiled against, in the
+# place ToGL's are for shaderapidx9. See docs/rust-port/d3d9-metal.md.
+
+top = '.'
+PROJECT_NAME = 'tometal'
+
+def options(opt):
+	return
+
+def configure(conf):
+	return
+
+def build(bld):
+	source = [
+		'dxabstract.cpp',
+		'd3dxmath.cpp',
+	]
+
+	includes = [
+		'.',
+		'../public',
+		'../public/tier0',
+		'../public/tier1'
+	] + bld.env.INCLUDES_SDL2
+
+	# TOMETAL switches togl/rendermechanism.h over to these classes, and
+	# TOGL_DLL_EXPORT marks them as the ones being defined rather than used.
+	defines = ['TOMETAL=1', 'TOGL_DLL_EXPORT=1', 'SOURCE_RUST_ENGINE=1']
+
+	libs = ['tier0','tier1','tier2','vstdlib','mathlib','rust_engine_bridge']
+
+	bld.shlib(
+		source   = source,
+		target   = PROJECT_NAME,
+		name     = PROJECT_NAME,
+		features = 'c cxx',
+		includes = includes,
+		defines  = defines,
+		use      = libs,
+		install_path = bld.env.LIBDIR,
+		subsystem = bld.env.MSVC_SUBSYSTEM,
+		idx      = bld.get_taskgen_count()
+	)

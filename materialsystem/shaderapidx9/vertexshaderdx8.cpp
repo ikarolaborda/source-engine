@@ -289,6 +289,37 @@ static void UnregisterPS( IDirect3DPixelShader9* pShader )
 }
 
 //-----------------------------------------------------------------------------
+// Writes each compiled shader handed to the device into SOURCE_SHADER_DUMP_DIR,
+// named by the shader and a checksum of its bytecode, so a run of the game
+// yields the corpus a bytecode translator has to be able to take.
+//-----------------------------------------------------------------------------
+static void DumpShaderByteCode( const DWORD *pByteCode, int numBytes, const char *pShaderName, const char *pExt )
+{
+	static const char *s_pDumpDir = getenv( "SOURCE_SHADER_DUMP_DIR" );
+	if ( !s_pDumpDir || !s_pDumpDir[0] || !pByteCode || numBytes <= 0 )
+		return;
+
+	unsigned int nHash = 2166136261u;
+	const unsigned char *pBytes = (const unsigned char *)pByteCode;
+	for ( int i = 0; i < numBytes; ++i )
+		nHash = ( nHash ^ pBytes[i] ) * 16777619u;
+
+	char szPath[1024];
+	Q_snprintf( szPath, sizeof( szPath ), "%s/%s_%08x.%s", s_pDumpDir, pShaderName ? pShaderName : "unnamed", nHash, pExt );
+	FILE *fp = fopen( szPath, "rb" );
+	if ( fp )
+	{
+		fclose( fp );
+		return;
+	}
+	fp = fopen( szPath, "wb" );
+	if ( !fp )
+		return;
+	fwrite( pByteCode, 1, numBytes, fp );
+	fclose( fp );
+}
+
+//-----------------------------------------------------------------------------
 // The lovely low-level dx call to create a vertex shader
 //-----------------------------------------------------------------------------
 static HardwareShader_t CreateD3DVertexShader( DWORD *pByteCode, int numBytes, const char *pShaderName, char *debugLabel = NULL )
@@ -300,6 +331,8 @@ static HardwareShader_t CreateD3DVertexShader( DWORD *pByteCode, int numBytes, c
 		Assert( 0 );
 		return INVALID_HARDWARE_SHADER;
 	}
+
+	DumpShaderByteCode( pByteCode, numBytes, pShaderName, "vso" );
 
 	// Compute the vertex specification
 	HardwareShader_t hShader;
@@ -420,6 +453,8 @@ static HardwareShader_t CreateD3DPixelShader( DWORD *pByteCode, unsigned int nCe
 			PatchPixelShaderForAtiMsaaHack( pByteCode, nCentroidMask );
 		}
 	}
+
+	DumpShaderByteCode( pByteCode, numBytes, pShaderName, "pso" );
 
 	HardwareShader_t shader;
 	#if defined( DX_TO_GL_ABSTRACTION ) 

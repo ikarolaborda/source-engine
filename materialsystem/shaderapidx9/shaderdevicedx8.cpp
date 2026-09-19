@@ -27,8 +27,10 @@
 #include "tier0/vprof_telemetry.h"
 
 #if defined ( DX_TO_GL_ABSTRACTION )
+#if !defined( TOMETAL )
 // Placed here so inlines placed in dxabstract.h can access gGL
 COpenGLEntryPoints *gGL = NULL;
+#endif	// Direct3D 9 on Metal has no OpenGL entry points to resolve
 #endif
 
 #define D3D_BATCH_PERF_ANALYSIS 0
@@ -143,7 +145,9 @@ bool CShaderDeviceMgrDx8::Connect( CreateInterfaceFn factory )
 	if ( !BaseClass::Connect( factory ) )
 		return false;
 
-#if defined ( DX_TO_GL_ABSTRACTION )
+#if defined( TOMETAL )
+	TometalConnectLibraries( factory );
+#elif defined ( DX_TO_GL_ABSTRACTION )
 	gGL = ToGLConnectLibraries( factory );
 #endif
 
@@ -251,7 +255,9 @@ void CShaderDeviceMgrDx8::Disconnect()
 		m_pD3D = 0;
 	}
 
-#if defined ( DX_TO_GL_ABSTRACTION )
+#if defined( TOMETAL )
+	TometalDisconnectLibraries();
+#elif defined ( DX_TO_GL_ABSTRACTION )
 	ToGLDisconnectLibraries();
 #endif
 

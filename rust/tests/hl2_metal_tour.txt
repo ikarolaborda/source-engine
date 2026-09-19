@@ -1,0 +1,30 @@
+// A walk through the things a renderer gets wrong: the flashlight and its
+// shadow map in a dark tunnel, muzzle flashes, impact particles and decals,
+// a spawned character under the light, then fire and water on other maps.
+Test_Wait 22
+sv_cheats 1
+god
+impulse 101
+Test_Wait 1
+impulse 100
+Test_Wait 4
+echo TOUR_FLASHLIGHT_ON
+npc_create npc_zombie
+Test_Wait 5
+use weapon_smg1
+Test_Wait 1
++attack
+Test_Wait 2
+-attack
+Test_Wait 3
+echo TOUR_SHOT
+impulse 100
+changelevel d1_town_01
+Test_WaitForCheckPoint FinishedMapLoad
+Test_Wait 12
+echo TOUR_TOWN
+changelevel d1_canals_07
+Test_WaitForCheckPoint FinishedMapLoad
+Test_Wait 12
+echo TOUR_WATER
+quit

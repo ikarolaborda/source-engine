@@ -1,4 +1,5 @@
 #include "rust_engine_bridge.h"
+#include "rust/source_d3d9.h"
 
 #include <atomic>
 #include <cstring>
@@ -1833,3 +1834,38 @@ extern "C" SourceAbiStatus source_rust_bridge_ui_end(
 		return SOURCE_ABI_INVALID_HANDLE;
 	return source_render_ui_end( presenter, width, height, quads );
 }
+
+// The Direct3D 9 on Metal device is called from tometal, not from here, and a
+// static library only contributes the objects something refers to. Naming the
+// entry points keeps them in this dylib for tometal to link against.
+extern "C" const void *const g_SourceD3D9Exports[] =
+{
+	(const void *)&source_d3d9_set_window,
+	(const void *)&source_d3d9_display_info,
+	(const void *)&source_d3d9_format_supported,
+	(const void *)&source_d3d9_device_create,
+	(const void *)&source_d3d9_device_destroy,
+	(const void *)&source_d3d9_device_reset,
+	(const void *)&source_d3d9_texture_create,
+	(const void *)&source_d3d9_texture_destroy,
+	(const void *)&source_d3d9_texture_lock,
+	(const void *)&source_d3d9_texture_unlock,
+	(const void *)&source_d3d9_buffer_create,
+	(const void *)&source_d3d9_buffer_destroy,
+	(const void *)&source_d3d9_buffer_lock,
+	(const void *)&source_d3d9_buffer_unlock,
+	(const void *)&source_d3d9_vertex_declaration_create,
+	(const void *)&source_d3d9_vertex_declaration_destroy,
+	(const void *)&source_d3d9_shader_create,
+	(const void *)&source_d3d9_shader_destroy,
+	(const void *)&source_d3d9_draw,
+	(const void *)&source_d3d9_draw_indexed,
+	(const void *)&source_d3d9_clear,
+	(const void *)&source_d3d9_stretch_rect,
+	(const void *)&source_d3d9_read_render_target,
+	(const void *)&source_d3d9_present,
+	(const void *)&source_d3d9_query_create,
+	(const void *)&source_d3d9_query_destroy,
+	(const void *)&source_d3d9_query_issue,
+	(const void *)&source_d3d9_query_get_data,
+};

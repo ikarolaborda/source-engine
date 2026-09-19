@@ -22,6 +22,7 @@
 #include "tier1/convar.h"
 #if defined( SOURCE_RUST_ENGINE )
 #include "rust_engine_bridge.h"
+#include "rust/source_d3d9.h"
 #endif
 #ifdef TOGLES
 #include <EGL/egl.h>
@@ -357,6 +358,11 @@ private:
 	// is aimed at rather than a second path beside ToGL.
 	SourceAbiHandle m_MetalPresenter;
 	bool m_bMetal;
+	// -metal with a shader API, which is Direct3D 9 on Metal. The device the
+	// shader API creates owns the layer and presents into it, so the window
+	// only has to be handed over; the presenter above belongs to the older
+	// -metal -noshaderapi path and stays unset.
+	bool m_bMetalDevice;
 #endif
 
 #if defined( OSX )
@@ -406,6 +412,15 @@ private:
 
 	float m_flMouseXScale;
 	float m_flMouseYScale;
+
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Under the Metal device the back buffer is in pixels and the window in
+	// points, and the two are related by whatever the window currently is
+	// rather than by the desktop's mode: a full-screen window on a notched
+	// display is shorter than the display. This re-derives the scale from
+	// the window itself.
+	void UpdateMetalMouseScale();
+#endif
 
 	// !!! FIXME: can we rename these from "Cocoa"?
 	CThreadMutex m_CocoaEventsMutex;					// use for either queue below
@@ -587,6 +602,7 @@ InitReturnVal_t CSDLMgr::Init()
 #if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
 	m_MetalPresenter = 0;
 	m_bMetal = CommandLine()->FindParm( "-metal" ) != 0;
+	m_bMetalDevice = m_bMetal && CommandLine()->FindParm( "-noshaderapi" ) == 0;
 #endif
 	m_nWindowRefCount = 0;
 	m_Window = NULL;
@@ -904,6 +920,14 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 		int scaledHeight = height;
 		SDL_GetWindowSize( m_Window, &scaledWidth, &scaledHeight );
 
+		if ( m_bMetalDevice )
+		{
+			source_d3d9_set_window( info.info.cocoa.window );
+			fprintf( stderr, "RUST_METAL_DEVICE_WINDOW points=%dx%d\n", scaledWidth, scaledHeight );
+			fflush( stderr );
+		}
+		else
+		{
 		const SourceAbiStatus status = source_render_presenter_create(
 			info.info.cocoa.window,
 			(uint32_t)scaledWidth,
@@ -942,6 +966,7 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 			(unsigned long long)m_MetalPresenter, scaledWidth, scaledHeight,
 			drawableWidth, drawableHeight );
 		fflush( stderr );
+		}
 	}
 #endif
 
@@ -1035,7 +1060,8 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	{
 		// The same blanking the GL path does above, so the window is not
 		// showing uninitialised video memory before the first real frame.
-		source_render_presenter_present( m_MetalPresenter, 0.0f, 0.0f, 0.0f );
+		if ( m_MetalPresenter != 0 )
+			source_render_presenter_present( m_MetalPresenter, 0.0f, 0.0f, 0.0f );
 	}
 #endif
 #endif // DX_TO_GL_ABSTRACTION
@@ -1193,6 +1219,18 @@ void CSDLMgr::SetCursorPosition( int x, int y )
 {
 	SDLAPP_FUNC;
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	if ( m_bMetalDevice )
+	{
+		// The caller speaks in back buffer pixels and SDL in window points.
+		UpdateMetalMouseScale();
+		if ( m_flMouseXScale > 0.0f && m_flMouseYScale > 0.0f )
+		{
+			x = (int)( x / m_flMouseXScale );
+			y = (int)( y / m_flMouseYScale );
+		}
+	}
+#endif
 	SDL_WarpMouseInWindow(m_Window, x, y);
 }
 
@@ -1579,6 +1617,23 @@ void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 #endif // DX_TO_GL_ABSTRACTION
 
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+void CSDLMgr::UpdateMetalMouseScale()
+{
+	if ( !m_bMetalDevice || !m_Window )
+		return;
+
+	int nWindowWidth = 0;
+	int nWindowHeight = 0;
+	SDL_GetWindowSize( m_Window, &nWindowWidth, &nWindowHeight );
+	if ( nWindowWidth <= 0 || nWindowHeight <= 0 || m_renderedWidth <= 0 || m_rendererHeight <= 0 )
+		return;
+
+	m_flMouseXScale = ( float )m_renderedWidth / ( float )nWindowWidth;
+	m_flMouseYScale = ( float )m_rendererHeight / ( float )nWindowHeight;
+}
+#endif
+
 void CSDLMgr::SetWindowFullScreen( bool bFullScreen, int nWidth, int nHeight )
 {
 	SDLAPP_FUNC;
@@ -1690,7 +1745,11 @@ void CSDLMgr::SizeWindow( int width, int tall )
 	SDL_SetWindowSize( m_Window, width, tall );
 
 #if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
-	if ( m_bMetal )
+	if ( m_bMetalDevice )
+	{
+		// The device re-reads the view's size when it next presents.
+	}
+	else if ( m_bMetal )
 	{
 		// The layer is told the window's new size in points; a scale of
 		// zero has it re-read the backing scale off the window, which is
@@ -1951,6 +2010,9 @@ void CSDLMgr::PumpWindowsMessageLoop()
 
 				CCocoaEvent theEvent;
 				theEvent.m_EventType = CocoaEvent_MouseMove;
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+				UpdateMetalMouseScale();
+#endif
 				theEvent.m_MousePos[0] = event.motion.x * m_flMouseXScale;
 				theEvent.m_MousePos[1] = event.motion.y * m_flMouseYScale;
 				theEvent.m_MouseButtonFlags = m_mouseButtons;
@@ -2034,6 +2096,9 @@ void CSDLMgr::PumpWindowsMessageLoop()
 
 				CCocoaEvent theEvent;
 				theEvent.m_EventType = (bPressed) ? CocoaEvent_MouseButtonDown : CocoaEvent_MouseButtonUp;
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+				UpdateMetalMouseScale();
+#endif
 				theEvent.m_MousePos[0] = event.button.x * m_flMouseXScale;
 				theEvent.m_MousePos[1] = event.button.y * m_flMouseYScale;
 				theEvent.m_MouseButtonFlags = m_mouseButtons;

@@ -8,6 +8,7 @@ members = [
     "rust/crates/source-bsp",
     "rust/crates/source-compress",
     "rust/crates/source-console",
+    "rust/crates/source-d3d9",
     "rust/crates/source-demo",
     "rust/crates/source-dmx",
     "rust/crates/source-filesystem",

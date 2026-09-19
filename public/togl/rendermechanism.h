@@ -23,7 +23,11 @@
 //  THE SOFTWARE.
 //
 
-#ifdef TOGLES
+#if defined( TOMETAL )
+// Direct3D 9 on Metal stands in for ToGL when the shader API is built as
+// shaderapimetal. See docs/rust-port/d3d9-metal.md.
+#include "tometal/rendermechanism.h"
+#elif defined( TOGLES )
 #include "togles/rendermechanism.h"
 #else
 

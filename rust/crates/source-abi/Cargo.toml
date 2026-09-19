@@ -12,6 +12,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 source-bsp = { path = "../source-bsp" }
 source-compress = { path = "../source-compress" }
 source-console = { path = "../source-console" }
+source-d3d9 = { path = "../source-d3d9" }
 source-demo = { path = "../source-demo" }
 source-filesystem = { path = "../source-filesystem" }
 source-host = { path = "../source-host" }

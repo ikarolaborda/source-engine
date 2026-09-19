@@ -770,6 +770,13 @@ bool CSourceAppSystemGroup::Create()
 	{
 		pDLLName = "shaderapiempty" DLL_EXT_STRING;
 	}
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	else if ( CommandLine()->FindParm( "-metal" ) )
+	{
+		// The same shader API over Direct3D 9 on Metal rather than ToGL.
+		pDLLName = "shaderapimetal" DLL_EXT_STRING;
+	}
+#endif
 
 	pMaterialSystem->SetShaderAPI( pDLLName );
 

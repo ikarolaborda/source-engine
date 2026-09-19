@@ -9,6 +9,7 @@ dependencies = [
  "source-bsp",
  "source-compress",
  "source-console",
+ "source-d3d9",
  "source-demo",
  "source-filesystem",
  "source-host",
@@ -70,6 +71,10 @@ dependencies = [
  "source-vpk",
  "source-vtf",
 ]
+
+[[package]]
+name = "source-d3d9"
+version = "0.1.0"
 
 [[package]]
 name = "source-demo"

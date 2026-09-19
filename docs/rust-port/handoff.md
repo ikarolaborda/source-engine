@@ -9,6 +9,45 @@ definition of done, what the last session changed, what the one open
 thread is and exactly what is known about it, and what remains. It is
 written to be picked up cold.
 
+## Read this first: the presentation plan changed on 2026-09-19
+
+Everything below the next heading was written before the change and is kept
+because its account of the host work and of the plan's phases is still
+right. Its account of presentation is not: "The one open thread", "What to
+do next" and the phase 6 list describe a route that has been left.
+
+That route was a renderer written from nothing behind a seam that passes a
+camera position. It drew the map and its static props. Every other thing the
+game draws, which is characters, view models, particles, decals, water, the
+HUD, the menus and the load screen, would have had to be written again
+behind it one at a time, and the HUD alone had taken a session without
+becoming legible. It could not have reached a playable game in any time
+worth planning for.
+
+The game is now drawn through Metal by replacing ToGL instead of replacing
+the renderer. `shaderapidx9` issues the Direct3D 9 calls it always has, and
+a Rust device (`rust/crates/source-d3d9`, behind the C++ classes in
+`tometal/`) turns them into Metal, translating the shipped shader bytecode
+to Metal Shading Language as it goes. Because nothing above Direct3D
+changed, the whole game draws, and it drew correctly the first time the
+device ran: the glyph problem does not exist on this path, since text is
+drawn by the same material system as everything else.
+
+**State:** `-metal` runs the menus and the campaign, full screen, at the
+display's own 3024x1898 pixels, at about 110 frames a second on an M5 Pro,
+with no OpenGL context in the process. The design, what was checked and how,
+the details that are easy to get wrong, and what is not done are in
+[`d3d9-metal.md`](d3d9-metal.md). `-metal -noshaderapi` still selects the
+older renderer, which is unchanged and no longer on the path to anything.
+
+What this does to the plan's two checks: the second, that the game presents
+through Metal with no `SDL_GL_CreateContext`, is now true of a `-metal` run,
+and `togl/` can be deleted once `-metal` is the default and has had a soak.
+The first, no first-party C++, is untouched: `tometal/` and its headers are
+about 3,100 lines of new C++, 600 of them ToGL's D3DX arithmetic carried
+over, against 6,000 of Rust, and the material system is as it was. That is the honest trade. The
+route that kept the C++ count falling was not going to produce a game.
+
 ## Where this stands against the plan's definition of done
 
 The plan in `rust_engine_port_470ce0ac.plan.md` defines done by two
