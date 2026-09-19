@@ -1655,6 +1655,16 @@ IMaterial *CMatSystemSurface::DrawGetTextureMaterial( int id )
 void CMatSystemSurface::ReferenceProceduralMaterial( int id, int referenceId, IMaterial *pMaterial )
 {
 	TextureDictionary()->BindTextureToMaterialReference( id, referenceId, pMaterial );
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// This is the engine saying that two identifiers are one texture,
+	// which is how a font sheet is drawn both normally and additively.
+	// The HUD's own text is additive, so without this every glyph it
+	// draws names a sheet that was never given pixels.
+	if ( source_rust_bridge_ui_active() )
+	{
+		source_rust_bridge_ui_texture_alias( (uint32_t)id, (uint32_t)referenceId );
+	}
+#endif
 }
 
 
@@ -4091,6 +4101,19 @@ void CMatSystemSurface::DrawSetTextureRGBAEx( int id, const unsigned char* rgba,
 void CMatSystemSurface::DrawSetSubTextureRGBA(int textureID, int drawX, int drawY, unsigned const char *rgba, int subTextureWide, int subTextureTall)
 {
 	TextureDictionary()->SetSubTextureRGBA( textureID, drawX, drawY, rgba, subTextureWide, subTextureTall );
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// A font sheet is not rasterised once. The engine draws each glyph
+	// into it the first time that character is asked for and says so
+	// here, so a sheet handed over without these holds only whatever was
+	// needed when it was made.
+	if ( source_rust_bridge_ui_active() && rgba != NULL &&
+		subTextureWide > 0 && subTextureTall > 0 && drawX >= 0 && drawY >= 0 )
+	{
+		source_rust_bridge_ui_texture_region(
+			(uint32_t)textureID, (uint32_t)drawX, (uint32_t)drawY,
+			(uint32_t)subTextureWide, (uint32_t)subTextureTall, rgba );
+	}
+#endif
 }
 
 void CMatSystemSurface::DrawUpdateRegionTextureRGBA( int nTextureID, int x, int y, const unsigned char *pchData, int wide, int tall, ImageFormat imageFormat )

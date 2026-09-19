@@ -271,13 +271,22 @@ static void SCR_PresentRustWorld( void )
 		g_CurrentViewOrigin.z };
 	const float angles[ 3 ] = { viewAngles.x, viewAngles.y, viewAngles.z };
 
-	// Closed here rather than where it was opened, so everything the
-	// interface painted during the view is uploaded before the present
-	// that composites it over the world.
+	// Everything the interface has painted since the last present is
+	// uploaded here and composited over the world by the present below.
 	uint64_t quads = 0;
 	source_rust_bridge_ui_end( &quads );
 
 	source_rust_bridge_scene_present( position, angles, &drawn );
+
+	// Gathering starts again only now. It cannot start before the view
+	// renders, because the engine paints the interface on every one of
+	// its own frames and presents on far fewer of them: with no shader
+	// API it paints about a hundred and twenty times a second and
+	// presents eighteen, so a window opened at the view and closed at the
+	// present catches only the paint that happened to fall inside it and
+	// throws the rest away. Between two presents is the whole of what the
+	// interface last drew.
+	source_rust_bridge_ui_begin();
 
 	// One line a second rather than one a frame, which is enough to show
 	// the view moving and what it costs without filling the log.
@@ -367,13 +376,6 @@ void SCR_UpdateScreen( void )
 	Shader_BeginRendering();
 				
 	// Draw world, etc.
-#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
-	// Opened before the view renders, because the interface is painted
-	// from inside it and its quads have to be gathered by the time the
-	// frame is presented below.
-	source_rust_bridge_ui_begin();
-#endif
-
 	V_RenderView();
 
 #if defined( SOURCE_RUST_ENGINE ) && defined( OSX )

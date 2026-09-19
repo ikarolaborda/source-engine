@@ -1107,6 +1107,20 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_texture(
 	uint32_t height,
 	const uint8_t *rgba );
 
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_texture_region(
+	SourceAbiHandle handle,
+	uint32_t id,
+	uint32_t x,
+	uint32_t y,
+	uint32_t width,
+	uint32_t height,
+	const uint8_t *rgba );
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_texture_alias(
+	SourceAbiHandle handle,
+	uint32_t alias,
+	uint32_t base );
+
 SOURCE_ABI_EXPORT int32_t source_render_ui_has_texture( SourceAbiHandle handle, uint32_t id );
 
 SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_quad(

@@ -1790,6 +1790,24 @@ extern "C" SourceAbiStatus source_rust_bridge_ui_texture(
 	return source_render_ui_texture( presenter, id, width, height, rgba );
 }
 
+extern "C" SourceAbiStatus source_rust_bridge_ui_texture_region(
+	uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+	const uint8_t *rgba )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 || rgba == NULL )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_texture_region( presenter, id, x, y, width, height, rgba );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_ui_texture_alias( uint32_t alias, uint32_t base )
+{
+	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
+	if ( presenter == 0 )
+		return SOURCE_ABI_INVALID_HANDLE;
+	return source_render_ui_texture_alias( presenter, alias, base );
+}
+
 extern "C" bool source_rust_bridge_ui_has_texture( uint32_t id )
 {
 	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );

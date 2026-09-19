@@ -527,6 +527,87 @@ pub unsafe extern "C" fn source_render_ui_texture(
     })
 }
 
+/// Replaces a rectangle of a texture the engine has already handed over.
+///
+/// The engine rasterises a font sheet once and then draws each glyph into
+/// it as that character is first asked for, so without this a sheet holds
+/// only the characters that happened to be needed when it was made.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created, and `rgba` must
+/// point at `width * height * 4` readable bytes.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_texture_region(
+    handle: SourceAbiHandle,
+    id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    rgba: *const u8,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if rgba.is_null() || width == 0 || height == 0 {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        let Some(count) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|texels| texels.checked_mul(4))
+        else {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller guarantees this many readable bytes, and the
+        // slice is only read before this call returns.
+        let pixels = unsafe { std::slice::from_raw_parts(rgba, count) };
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(presenter) = presenters.get_mut(&handle) else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            let device = &presenter.device;
+            let Some(overlay) = presenter.overlay.as_mut() else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            match overlay.set_sub_texture(device, id, x, y, width, height, pixels) {
+                Ok(()) => SOURCE_ABI_OK,
+                Err(_) => SOURCE_ABI_INTERNAL_ERROR,
+            }
+        })
+    })
+}
+
+/// Records that one texture identifier names the same pixels as another.
+///
+/// The engine makes two identifiers for every font sheet, one drawn
+/// normally and one additively, and gives the pixels to only one of them.
+///
+/// # Safety
+///
+/// `handle` must name a presenter this library created.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub unsafe extern "C" fn source_render_ui_texture_alias(
+    handle: SourceAbiHandle,
+    alias: u32,
+    base: u32,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        PRESENTERS.with(|presenters| {
+            let mut presenters = presenters.borrow_mut();
+            let Some(overlay) = presenters
+                .get_mut(&handle)
+                .and_then(|presenter| presenter.overlay.as_mut())
+            else {
+                return SOURCE_ABI_INVALID_HANDLE;
+            };
+            overlay.alias(alias, base);
+            SOURCE_ABI_OK
+        })
+    })
+}
+
 /// Whether a texture identifier already holds pixels, so the engine can
 /// skip handing over a sheet that has not changed.
 ///

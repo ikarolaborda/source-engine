@@ -38,6 +38,11 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT bool source_rust_bridge_ui_active();
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_begin();
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_texture(
 	uint32_t id, uint32_t width, uint32_t height, const uint8_t *rgba );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_texture_region(
+	uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+	const uint8_t *rgba );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_texture_alias(
+	uint32_t alias, uint32_t base );
 extern "C" SOURCE_RUST_BRIDGE_EXPORT bool source_rust_bridge_ui_has_texture( uint32_t id );
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_quad(
 	uint32_t texture, const float *bounds, const float *coords, const float *tint );

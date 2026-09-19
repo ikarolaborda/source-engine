@@ -76,11 +76,30 @@ pub struct Overlay {
     /// them with. The engine allocates these itself and reuses them across
     /// frames, so they are kept until it replaces them.
     textures: HashMap<u32, Texture>,
+    /// The pixels each texture was last given, kept because the engine
+    /// updates a sheet a rectangle at a time as it rasterises new glyphs
+    /// into it, and a partial update has to be composed against what is
+    /// already there before the whole sheet goes back to the device.
+    pixels: HashMap<u32, Sheet>,
+    /// Identifiers the engine has declared to be a second name for
+    /// another, which is how it draws one font sheet both normally and
+    /// additively: two identifiers, one set of pixels. Resolved when a
+    /// rectangle is drawn rather than by copying, so a later update to
+    /// the sheet reaches every name for it.
+    aliases: HashMap<u32, u32>,
     /// A single opaque white texel, so a rectangle with no texture is the
     /// same draw as one with a texture rather than a second pipeline.
     white: Texture,
     quads: Vec<Quad>,
     frame: Option<Frame>,
+}
+
+/// A texture's pixels as the engine last left them, in the order the
+/// device stores them.
+struct Sheet {
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
 }
 
 /// One frame's geometry, uploaded together.
@@ -108,6 +127,8 @@ impl Overlay {
                 .create_blended_pipeline(&library, "overlay_vertex", "overlay_fragment")
                 .map_err(|error| Error::Device(error.to_string()))?,
             textures: HashMap::new(),
+            pixels: HashMap::new(),
+            aliases: HashMap::new(),
             white: device
                 .create_texture(1, 1, TextureFormat::Bgra8Unorm, &[255, 255, 255, 255])
                 .map_err(|error| Error::Device(error.to_string()))?,
@@ -151,12 +172,108 @@ impl Overlay {
             .create_texture(width, height, TextureFormat::Bgra8Unorm, &bgra)
             .map_err(|error| Error::Device(error.to_string()))?;
         self.textures.insert(id, texture);
+        self.pixels.insert(
+            id,
+            Sheet {
+                width,
+                height,
+                bgra,
+            },
+        );
         Ok(())
     }
 
-    /// Whether a texture identifier has been given pixels.
+    /// Replaces a rectangle of a texture the engine has already given.
+    ///
+    /// A font sheet is not rasterised once: the engine draws each glyph
+    /// into it the first time that character is asked for, and says so
+    /// with one of these. Without it a sheet holds only the characters
+    /// that happened to be needed when it was created, so a HUD that
+    /// counts down from a hundred loses its digits as it goes.
+    pub fn set_sub_texture(
+        &mut self,
+        device: &Device,
+        id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), Error> {
+        let expected = (width as usize) * (height as usize) * 4;
+        if rgba.len() < expected {
+            return Err(Error::ShortTexture {
+                id,
+                given: rgba.len(),
+                expected,
+            });
+        }
+        let Some(sheet) = self.pixels.get_mut(&id) else {
+            // The engine can update a sheet this module was never given,
+            // because it only hands over whole sheets it rasterises
+            // itself. There is nothing to compose against, and inventing
+            // a sheet the right size would put the glyph on a field of
+            // whatever this module guessed, so it is left alone.
+            return Ok(());
+        };
+        if x + width > sheet.width || y + height > sheet.height {
+            return Err(Error::SubTextureOutOfBounds {
+                id,
+                x,
+                y,
+                width,
+                height,
+                sheet_width: sheet.width,
+                sheet_height: sheet.height,
+            });
+        }
+        for row in 0..height as usize {
+            let source = &rgba[row * width as usize * 4..][..width as usize * 4];
+            let start = ((y as usize + row) * sheet.width as usize + x as usize) * 4;
+            for (texel, target) in source
+                .chunks_exact(4)
+                .zip(sheet.bgra[start..][..width as usize * 4].chunks_exact_mut(4))
+            {
+                target.copy_from_slice(&[texel[2], texel[1], texel[0], texel[3]]);
+            }
+        }
+        let texture = device
+            .create_texture(
+                sheet.width,
+                sheet.height,
+                TextureFormat::Bgra8Unorm,
+                &sheet.bgra,
+            )
+            .map_err(|error| Error::Device(error.to_string()))?;
+        self.textures.insert(id, texture);
+        Ok(())
+    }
+
+    /// Records that one identifier names the same pixels as another.
+    ///
+    /// The engine makes two of these for every font sheet, one drawn
+    /// normally and one additively, and says which is which here rather
+    /// than by handing the pixels over twice.
+    pub fn alias(&mut self, alias: u32, base: u32) {
+        if alias != base {
+            self.aliases.insert(alias, base);
+        }
+    }
+
+    /// The identifier that actually holds pixels for this one.
+    fn resolve(&self, id: u32) -> u32 {
+        // One hop is all the engine makes; following further would only
+        // open the question of what a cycle means.
+        match self.aliases.get(&id) {
+            Some(base) if self.textures.contains_key(base) => *base,
+            _ => id,
+        }
+    }
+
+    /// Whether a texture identifier has pixels, under its own name or the
+    /// one it aliases.
     pub fn has_texture(&self, id: u32) -> bool {
-        self.textures.contains_key(&id)
+        self.textures.contains_key(&self.resolve(id))
     }
 
     /// Adds a rectangle to the frame being gathered.
@@ -218,7 +335,10 @@ impl Overlay {
             // drawn as the flat tint rather than skipped, so a missing
             // sheet shows as a block where it belongs instead of leaving
             // a hole with nothing to explain it.
-            let texture = quad.texture.filter(|id| self.textures.contains_key(id));
+            let texture = quad
+                .texture
+                .map(|id| self.resolve(id))
+                .filter(|id| self.textures.contains_key(id));
             match runs.last_mut() {
                 Some((last, _, count)) if *last == texture => *count += 6,
                 _ => runs.push((texture, first, 6)),
@@ -308,6 +428,16 @@ pub enum Error {
         /// Bytes its width and height call for.
         expected: usize,
     },
+    /// An update named a rectangle reaching past the sheet it updates.
+    SubTextureOutOfBounds {
+        id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        sheet_width: u32,
+        sheet_height: u32,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -321,6 +451,19 @@ impl std::fmt::Display for Error {
             } => write!(
                 formatter,
                 "texture {id} was offered {given} bytes and needs {expected}"
+            ),
+            Self::SubTextureOutOfBounds {
+                id,
+                x,
+                y,
+                width,
+                height,
+                sheet_width,
+                sheet_height,
+            } => write!(
+                formatter,
+                "update of {width}x{height} at {x},{y} reaches past \
+                 texture {id}, which is {sheet_width}x{sheet_height}"
             ),
         }
     }
