@@ -19,7 +19,15 @@ echo RUST_HUD_AUDIO_STARTED
 // d1_trainstation_01 opens with a scripted train ride that holds the player
 // in a pod without a suit, so the suit-power element never renders there.
 changelevel d1_trainstation_02
-Test_Wait 25
+// Wait for the client to be in the new level rather than for a fixed time.
+// The transition takes about nineteen seconds with the legacy renderer and
+// about forty-three with no shader API at all, so a guessed wait that suits
+// one configuration runs the commands below in the other while the client
+// is still in the old level. This checkpoint is what the client emits once
+// it is fully connected. Deliberately not `once`: it has already been hit
+// for the first map, and this has to wait for the next one.
+Test_WaitForCheckPoint FinishedMapLoad
+Test_Wait 5
 echo RUST_HUD_AUDIO_BASELINE
 soundinfo
 // A level change restarts the server, which can revert cheat-gated cvars.

@@ -14,7 +14,15 @@ echo RUST_SOAK_STARTED
 // in a pod, so the held movement below would simulate nothing there. Soak the
 // first map where the player actually has control.
 changelevel d1_trainstation_02
-Test_Wait 25
+// Wait for the client to be in the new level rather than for a fixed time.
+// The transition takes about nineteen seconds with the legacy renderer and
+// about forty-three with no shader API at all, so a guessed wait that suits
+// one configuration runs the commands below in the other while the client
+// is still in the old level. This checkpoint is what the client emits once
+// it is fully connected. Deliberately not `once`: it has already been hit
+// for the first map, and this has to wait for the next one.
+Test_WaitForCheckPoint FinishedMapLoad
+Test_Wait 5
 echo RUST_SOAK_WALK_BEFORE
 getpos 2
 +forward

@@ -467,18 +467,35 @@ elif [ "$SCENARIO" = "physics" ]; then
 	# often as on two. Every scan below therefore reads the marker's own
 	# line as well: skipping it lost the sample whenever they shared one,
 	# which read as a physics failure on a run that had worked.
+	# Only the coordinates are compared. Printing the matched line whole and
+	# trimming it back to everything after `setpos_exact` left the engine's
+	# own timestamps inside the string, and a timestamp differs between two
+	# samples whatever the player did, so the comparison below could never
+	# fail. A run in which the player never moved at all passed this check.
 	WALK_BEFORE=$(awk '
 		/RUST_PHYSICS_WALK_AFTER/ { watching = 0 }
 		/RUST_PHYSICS_WALK_BEFORE/ { watching = 1 }
-		watching && /setpos_exact/ { print; exit }' "$ENGINE_LOG")
+		watching && /setpos_exact/ {
+			line = $0
+			sub( /^.*setpos_exact /, "", line )
+			sub( /;.*/, "", line )
+			print line
+			exit
+		}' "$ENGINE_LOG")
 	WALK_AFTER=$(awk '
 		/RUST_PHYSICS_WALK_AFTER/ { watching = 1 }
-		watching && /setpos_exact/ { print; exit }' "$ENGINE_LOG")
+		watching && /setpos_exact/ {
+			line = $0
+			sub( /^.*setpos_exact /, "", line )
+			sub( /;.*/, "", line )
+			print line
+			exit
+		}' "$ENGINE_LOG")
 	if [ -z "$WALK_BEFORE" ] || [ -z "$WALK_AFTER" ]; then
 		echo "physics scenario did not report player positions" >&2
 		exit 1
 	fi
-	if [ "${WALK_BEFORE#*setpos_exact}" = "${WALK_AFTER#*setpos_exact}" ]; then
+	if [ "$WALK_BEFORE" = "$WALK_AFTER" ]; then
 		echo "physics scenario player never moved: $WALK_BEFORE" >&2
 		exit 1
 	fi
@@ -616,18 +633,31 @@ elif [ "$SCENARIO" = "soak" ]; then
 	done
 	# An hour of held movement commands proves nothing if the map holds the
 	# player still, so confirm the player really moves before the loop.
+	# Coordinates only, for the reason given in the physics scenario above.
 	SOAK_BEFORE=$(awk '
 		/RUST_SOAK_WALK_AFTER/ { watching = 0 }
 		/RUST_SOAK_WALK_BEFORE/ { watching = 1 }
-		watching && /setpos_exact/ { print; exit }' "$ENGINE_LOG")
+		watching && /setpos_exact/ {
+			line = $0
+			sub( /^.*setpos_exact /, "", line )
+			sub( /;.*/, "", line )
+			print line
+			exit
+		}' "$ENGINE_LOG")
 	SOAK_AFTER=$(awk '
 		/RUST_SOAK_WALK_AFTER/ { watching = 1 }
-		watching && /setpos_exact/ { print; exit }' "$ENGINE_LOG")
+		watching && /setpos_exact/ {
+			line = $0
+			sub( /^.*setpos_exact /, "", line )
+			sub( /;.*/, "", line )
+			print line
+			exit
+		}' "$ENGINE_LOG")
 	if [ -z "$SOAK_BEFORE" ] || [ -z "$SOAK_AFTER" ]; then
 		echo "soak scenario did not report player positions" >&2
 		exit 1
 	fi
-	if [ "${SOAK_BEFORE#*setpos_exact}" = "${SOAK_AFTER#*setpos_exact}" ]; then
+	if [ "$SOAK_BEFORE" = "$SOAK_AFTER" ]; then
 		echo "soak scenario player never moved: $SOAK_BEFORE" >&2
 		exit 1
 	fi

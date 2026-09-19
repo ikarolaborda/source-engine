@@ -17,7 +17,18 @@ echo RUST_PHYSICS_INTERACTION_STARTED
 // in a pod, so nothing here could push a prop. Move to the first map where
 // the player actually has control.
 changelevel d1_trainstation_02
-Test_Wait 25
+// Wait for the client to actually be in the new level rather than for a
+// fixed time. The transition takes about nineteen seconds with the legacy
+// renderer and about forty-three with no shader API at all, so a guessed
+// wait that suits one configuration runs the commands below in the other
+// while the client is still in the old level: `getpos` then reports the
+// previous map's spawn twice over and `+forward` moves nothing, which
+// reads as a physics failure on a run where physics was never reached.
+// This checkpoint is what the client emits once it is fully connected.
+// Deliberately not `once`: it has already been hit for the first map, and
+// this has to wait for the next one.
+Test_WaitForCheckPoint FinishedMapLoad
+Test_Wait 5
 echo RUST_PHYSICS_WALK_BEFORE
 getpos 2
 +forward
