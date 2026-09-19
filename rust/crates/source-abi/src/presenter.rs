@@ -690,6 +690,13 @@ pub unsafe extern "C" fn source_render_ui_quad(
 /// Uploads the gathered rectangles so the next present draws them, and
 /// reports how many there were.
 ///
+/// `width` and `height` are the coordinate space the rectangles were
+/// stated in, which is the size the engine's surface reports rather than
+/// the size of the drawable. The two differ whenever the display is not
+/// addressed one pixel per point, and taking the drawable's size instead
+/// draws the whole interface into a corner of the screen at the ratio
+/// between them.
+///
 /// # Safety
 ///
 /// `handle` must name a presenter this library created. `out_quads`, when
@@ -698,6 +705,8 @@ pub unsafe extern "C" fn source_render_ui_quad(
 #[no_mangle]
 pub unsafe extern "C" fn source_render_ui_end(
     handle: SourceAbiHandle,
+    width: u32,
+    height: u32,
     out_quads: *mut u64,
 ) -> SourceAbiStatus {
     ffi_status(|| {
@@ -706,7 +715,13 @@ pub unsafe extern "C" fn source_render_ui_end(
             let Some(presenter) = presenters.get_mut(&handle) else {
                 return SOURCE_ABI_INVALID_HANDLE;
             };
-            let (width, height) = presenter.swapchain.size();
+            // Falling back to the drawable keeps a caller that cannot say
+            // drawing something rather than nothing.
+            let (width, height) = if width > 0 && height > 0 {
+                (width, height)
+            } else {
+                presenter.swapchain.size()
+            };
             let device = &presenter.device;
             let Some(overlay) = presenter.overlay.as_mut() else {
                 return SOURCE_ABI_INVALID_HANDLE;

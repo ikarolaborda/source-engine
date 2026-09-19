@@ -273,8 +273,19 @@ static void SCR_PresentRustWorld( void )
 
 	// Everything the interface has painted since the last present is
 	// uploaded here and composited over the world by the present below.
+	// The interface states its rectangles in the surface's own coordinate
+	// space, which is not the drawable's: the drawable is in pixels and
+	// this is in whatever the engine calls a screen. Handing over the
+	// drawable instead draws the whole interface into a corner at the
+	// ratio between the two.
+	int viewportX = 0, viewportY = 0, surfaceWide = 0, surfaceTall = 0;
+	{
+		CMatRenderContextPtr pRenderContext( materials );
+		pRenderContext->GetViewport( viewportX, viewportY, surfaceWide, surfaceTall );
+	}
 	uint64_t quads = 0;
-	source_rust_bridge_ui_end( &quads );
+	source_rust_bridge_ui_end( (uint32_t)MAX( surfaceWide, 0 ),
+		(uint32_t)MAX( surfaceTall, 0 ), &quads );
 
 	source_rust_bridge_scene_present( position, angles, &drawn );
 

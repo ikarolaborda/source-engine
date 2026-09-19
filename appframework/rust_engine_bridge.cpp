@@ -1825,10 +1825,11 @@ extern "C" SourceAbiStatus source_rust_bridge_ui_quad(
 	return source_render_ui_quad( presenter, texture, bounds, coords, tint );
 }
 
-extern "C" SourceAbiStatus source_rust_bridge_ui_end( uint64_t *quads )
+extern "C" SourceAbiStatus source_rust_bridge_ui_end(
+	uint32_t width, uint32_t height, uint64_t *quads )
 {
 	const SourceAbiHandle presenter = g_MetalPresenterHandle.load( std::memory_order_acquire );
 	if ( presenter == 0 )
 		return SOURCE_ABI_INVALID_HANDLE;
-	return source_render_ui_end( presenter, quads );
+	return source_render_ui_end( presenter, width, height, quads );
 }

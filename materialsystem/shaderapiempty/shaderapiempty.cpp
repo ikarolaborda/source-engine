@@ -335,8 +335,8 @@ public:
 private:
 	CEmptyMesh m_Mesh;
 	CEmptyMesh m_DynamicMesh;
-	int m_WindowWidth = 1024;
-	int m_WindowHeight = 768;
+	int m_WindowWidth = 0;
+	int m_WindowHeight = 0;
 };
 
 static CShaderDeviceEmpty s_ShaderDeviceEmpty;
@@ -432,13 +432,27 @@ public:
 	void ClearSnapshots();
 
 	// Sets the mode...
+	//
+	// This is the call the material system actually makes; the device
+	// manager's SetMode below is never reached on this path. The size has
+	// to be latched from one of them, because everything that asks how big
+	// the screen is ends up here: the render context falls back to the
+	// back buffer's size whenever no viewport has been pushed, VGUI takes
+	// that as the screen, and Half-Life 2 lays its HUD out in proportion
+	// to it. A device that draws nothing still has to answer this
+	// truthfully, and answering with a built-in guess lays the interface
+	// out for a screen that does not exist.
 	bool SetMode( void* hwnd, int nAdapter, const ShaderDeviceInfo_t &info )
 	{
+		s_ShaderDeviceEmpty.SetWindowSize(
+			info.m_DisplayMode.m_nWidth, info.m_DisplayMode.m_nHeight );
 		return true;
 	}
 
 	void ChangeVideoMode( const ShaderDeviceInfo_t &info )
 	{
+		s_ShaderDeviceEmpty.SetWindowSize(
+			info.m_DisplayMode.m_nWidth, info.m_DisplayMode.m_nHeight );
 	}
 
 	// Called when the dx support level has changed

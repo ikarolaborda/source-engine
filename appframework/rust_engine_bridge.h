@@ -46,7 +46,8 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_textu
 extern "C" SOURCE_RUST_BRIDGE_EXPORT bool source_rust_bridge_ui_has_texture( uint32_t id );
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_quad(
 	uint32_t texture, const float *bounds, const float *coords, const float *tint );
-extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_end( uint64_t *quads );
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_ui_end(
+	uint32_t width, uint32_t height, uint64_t *quads );
 
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_scene_present(
 	const float *position, const float *angles, SourceAbiWorldDraw *drawn);

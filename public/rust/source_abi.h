@@ -1130,7 +1130,11 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_quad(
 	const float *coords,
 	const float *tint );
 
-SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_end( SourceAbiHandle handle, uint64_t *out_quads );
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_ui_end(
+	SourceAbiHandle handle,
+	uint32_t width,
+	uint32_t height,
+	uint64_t *out_quads );
 
 SOURCE_ABI_EXPORT SourceAbiStatus source_render_world_present(
 	SourceAbiHandle handle,

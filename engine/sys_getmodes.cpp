@@ -262,6 +262,18 @@ CVideoMode_Common::CVideoMode_Common( void )
     m_bWindowed            = false;
     m_nModeWidth           = IsPC() ? 1024 : 640;
     m_nModeHeight          = IsPC() ? 768 : 480;
+	// These were left uninitialised, and they are not private bookkeeping:
+	// `GetModeUIWidth` and `GetModeUIHeight` are what the engine sizes its
+	// root VGUI panel from, and everything drawn on the screen is clipped
+	// against that panel. Only `ResetCurrentModeForNewResolution` ever
+	// assigned them, so any read before the first mode is chosen returned
+	// whatever the allocation happened to contain, and a root panel sized
+	// from that silently clips the interface to a rectangle nobody asked
+	// for while every panel inside it reports the size it should be.
+	m_nUIWidth             = m_nModeWidth;
+	m_nUIHeight            = m_nModeHeight;
+	m_nStereoWidth         = m_nModeWidth;
+	m_nStereoHeight        = m_nModeHeight;
 	m_bVROverride = false;
 }
 
