@@ -1038,6 +1038,48 @@ SOURCE_ABI_EXPORT uint64_t source_context_live_count(void);
 /* ABI-lab hook: deliberately panics internally and must return SOURCE_ABI_PANIC. */
 SOURCE_ABI_EXPORT SourceAbiStatus source_context_force_panic_for_test(SourceAbiHandle handle);
 
+/* Presenting Metal frames into the window the engine owns.
+ *
+ * The renderer could already draw into a layer of its own and read it back
+ * offscreen. These hand it the window's own view instead, which is what
+ * lets it draw what a player sees. A presenter belongs to the thread that
+ * created it, because AppKit requires view changes on the main thread;
+ * used from any other it reports SOURCE_ABI_INVALID_HANDLE rather than
+ * appearing to work. */
+
+/* `window` must be a live NSWindow that outlives the presenter, and this
+ * must be called on the main thread. The window is taken rather than its
+ * view so that the caller never has to send an Objective-C message: every
+ * one of those stays on the Rust side. The caller owns the returned handle
+ * and must destroy it exactly once, before the window goes away. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_create(
+	void *window,
+	uint32_t width,
+	uint32_t height,
+	double scale,
+	SourceAbiHandle *out_handle);
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_destroy(SourceAbiHandle handle);
+
+/* Size and backing scale together, because a window moved between a Retina
+ * display and an external one changes scale without changing its size in
+ * points, and a layer tracking only one draws at the wrong resolution. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_resize(
+	SourceAbiHandle handle,
+	uint32_t width,
+	uint32_t height,
+	double scale);
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_present(
+	SourceAbiHandle handle,
+	float red,
+	float green,
+	float blue);
+
+SOURCE_ABI_EXPORT SourceAbiStatus source_render_presenter_drawable_size(
+	SourceAbiHandle handle,
+	uint32_t *out_width,
+	uint32_t *out_height);
+
 #ifdef __cplusplus
 } /* extern "C" */
 

@@ -31,7 +31,7 @@ pub use resource::{Buffer, IndexFormat, Texture};
 #[cfg(target_os = "macos")]
 pub use shader::{Library, Pipeline};
 #[cfg(target_os = "macos")]
-pub use swapchain::Swapchain;
+pub use swapchain::{backing_scale_of, Swapchain};
 
 /// How a texture's pixels are laid out.
 ///

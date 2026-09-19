@@ -87,6 +87,16 @@ def build(bld):
 		rust_linkflags = []
 		if bld.env.DEST_OS == 'darwin':
 			rust_linkflags += ['-Wl,-install_name,@loader_path/librust_engine_bridge.dylib']
+			# The Rust renderer talks to Metal and Core Animation through
+			# the Objective-C runtime directly rather than through a
+			# crate, so nothing else pulls these in.
+			rust_linkflags += [
+				'-framework', 'Metal',
+				'-framework', 'QuartzCore',
+				'-framework', 'Foundation',
+				'-framework', 'AppKit',
+				'-lobjc',
+			]
 		bld.shlib(
 			source   = ['rust_engine_bridge.cpp'],
 			target   = 'rust_engine_bridge',

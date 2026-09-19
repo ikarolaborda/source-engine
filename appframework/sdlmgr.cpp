@@ -7,6 +7,7 @@
 #ifdef USE_SDL
 #include "SDL.h"
 #include "SDL_opengl.h"
+#include "SDL_syswm.h"
 #endif
 
 #include "appframework/ilaunchermgr.h"
@@ -349,6 +350,15 @@ private:
 	GLMDisplayDB *m_displayDB;
 #endif
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// The Rust renderer presenting into this window's own view, under
+	// -metal. While this is live the window carries a CAMetalLayer and no
+	// GL context was ever created for it, which is the end state the port
+	// is aimed at rather than a second path beside ToGL.
+	SourceAbiHandle m_MetalPresenter;
+	bool m_bMetal;
+#endif
+
 #if defined( OSX )
 	// bool					m_leopard;					// true if <10.6.3 and we have to do extra work for fullscreen handling
 	bool					m_force_vsync;				// true if 10.6.4 + bad NV driver
@@ -573,6 +583,10 @@ InitReturnVal_t CSDLMgr::Init()
 	m_GLContext = NULL;
 	m_readFBO = 0;
 	m_displayDB = NULL;
+#endif
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	m_MetalPresenter = 0;
+	m_bMetal = CommandLine()->FindParm( "-metal" ) != 0;
 #endif
 	m_nWindowRefCount = 0;
 	m_Window = NULL;
@@ -839,6 +853,13 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 #if defined( DX_TO_GL_ABSTRACTION )
 	flags |= SDL_WINDOW_OPENGL;
 #endif
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Under -metal the window carries a CAMetalLayer instead, and asking
+	// SDL for an OpenGL window would have it create a pixel format and a
+	// context this never uses.
+	if ( m_bMetal )
+		flags &= ~SDL_WINDOW_OPENGL;
+#endif
 	m_Window = SDL_CreateWindow( pTitle, x, y, width, height, flags );
 
 	if (m_Window == NULL)
@@ -867,7 +888,52 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	}
 #endif
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	if ( m_bMetal )
+	{
+		SDL_SysWMinfo info;
+		SDL_VERSION( &info.version );
+		if ( !SDL_GetWindowWMInfo( m_Window, &info ) )
+			Error( "Failed to read the window's native handle: %s", SDL_GetError() );
+
+		// Points, not pixels: the layer is told the backing scale
+		// separately and works its own drawable size out from the two.
+		// A scale of zero asks the window for its own, which keeps this
+		// from having to know whether the display is Retina.
+		int scaledWidth = width;
+		int scaledHeight = height;
+		SDL_GetWindowSize( m_Window, &scaledWidth, &scaledHeight );
+
+		const SourceAbiStatus status = source_render_presenter_create(
+			info.info.cocoa.window,
+			(uint32_t)scaledWidth,
+			(uint32_t)scaledHeight,
+			0.0,
+			&m_MetalPresenter );
+		if ( status != SOURCE_ABI_OK )
+			Error( "Failed to attach the Metal renderer to the window: status %d", status );
+
+		uint32_t drawableWidth = 0;
+		uint32_t drawableHeight = 0;
+		source_render_presenter_drawable_size( m_MetalPresenter, &drawableWidth, &drawableHeight );
+		// Written to stderr and flushed rather than through Msg, because
+		// this happens before the console is up and a buffered marker
+		// would be lost in exactly the runs worth diagnosing.
+		fprintf( stderr, "RUST_METAL_ATTACHED presenter=%llu points=%dx%d drawable=%ux%u\n",
+			(unsigned long long)m_MetalPresenter, scaledWidth, scaledHeight,
+			drawableWidth, drawableHeight );
+		fflush( stderr );
+	}
+#endif
+
 #if defined( DX_TO_GL_ABSTRACTION )
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	// Everything from here to the end of this block needs a current GL
+	// context. Under -metal there is none and there never will be, so the
+	// whole of it is skipped rather than guarded call by call.
+	if ( !m_bMetal )
+	{
+#endif
 	m_GLContext = SDL_GL_CreateContext(m_Window);
 	if (m_GLContext == NULL)
 		Error( "Failed to create GL context: %s", SDL_GetError() );
@@ -944,6 +1010,15 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 	SDL_GL_SwapWindow(m_Window);
 	gGL->glClear(GL_COLOR_BUFFER_BIT);
 	SDL_GL_SwapWindow(m_Window);
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	}
+	else
+	{
+		// The same blanking the GL path does above, so the window is not
+		// showing uninitialised video memory before the first real frame.
+		source_render_presenter_present( m_MetalPresenter, 0.0f, 0.0f, 0.0f );
+	}
+#endif
 #endif // DX_TO_GL_ABSTRACTION
 
 	m_WindowWidth = width;
@@ -1452,6 +1527,16 @@ void CSDLMgr::ShowPixels( CShowPixelsParams *params )
 	CFastTimer tm;
 	tm.Start();
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	if ( m_bMetal )
+	{
+		// The scene is not drawn through here yet, so this presents a
+		// frame that says which renderer is on screen rather than a black
+		// one that would be indistinguishable from a dead window.
+		source_render_presenter_present( m_MetalPresenter, 0.05f, 0.09f, 0.16f );
+	}
+	else
+#endif
 	SDL_GL_SwapWindow( m_Window );
 
 	m_flPrevGLSwapWindowTime = tm.GetDurationInProgress().GetMillisecondsF();
@@ -1585,10 +1670,25 @@ void CSDLMgr::SizeWindow( int width, int tall )
 
 	SDL_SetWindowSize( m_Window, width, tall );
 
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	if ( m_bMetal )
+	{
+		// The layer is told the window's new size in points; a scale of
+		// zero has it re-read the backing scale off the window, which is
+		// what keeps a window dragged onto a display of a different scale
+		// drawing at that display's resolution rather than the one it was
+		// made on.
+		source_render_presenter_resize(
+			m_MetalPresenter, (uint32_t)width, (uint32_t)tall, 0.0 );
+	}
+	else
+#endif
+	{
 #if defined( DX_TO_GL_ABSTRACTION )
 	gGL->glViewport(0, 0, (GLsizei) width, (GLsizei) tall);
 	gGL->glScissor( 0,0, (GLsizei) width, (GLsizei) tall );
 #endif
+	}
 
 	// If the Window hasn't been shown yet, show it now.
 	if ( !m_WindowShownAndRaised )
@@ -2098,6 +2198,13 @@ void CSDLMgr::DecWindowRefCount()
 
 void CSDLMgr::DestroyGameWindow()
 {
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	if ( m_MetalPresenter != 0 )
+	{
+		source_render_presenter_destroy( m_MetalPresenter );
+		m_MetalPresenter = 0;
+	}
+#endif
 	SDLAPP_FUNC;
 
 	if ( m_Window )

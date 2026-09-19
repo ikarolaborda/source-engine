@@ -14,6 +14,7 @@ dependencies = [
  "source-host",
  "source-input",
  "source-net",
+ "source-render",
  "source-save",
  "source-scene",
  "source-vpk",

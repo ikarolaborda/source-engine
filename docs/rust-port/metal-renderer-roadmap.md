@@ -237,6 +237,35 @@ parity.
    runtime. Until that is done the props are lit but dimmer than the world
    they stand in, which is visible and expected rather than a defect in
    what is read.
+   The renderer now reaches the engine's own window. Everything above
+   draws into a layer of its own and is read back offscreen, which proves
+   the drawing but not that any of it can appear on screen, and the note
+   here used to say attachment waited on the ToGL hand-off. That was
+   circular: nothing would schedule the hand-off until something drew into
+   the window. Under `-metal` the window is created without
+   `SDL_WINDOW_OPENGL`, no GL context is made for it, and the Rust
+   renderer attaches a `CAMetalLayer` to the window's own view through
+   four new ABI entries. On `d1_trainstation_01` this reports
+   `points=1280x720 drawable=2560x1440`, the backing scale having been
+   read off the window rather than passed in, so a window dragged between
+   displays of different scale redraws at the one it is on.
+   The window is handed across rather than its view, so that the C++ side
+   never sends an Objective-C message: every one of them stays on the Rust
+   side. Presenters are held per thread rather than in a shared map,
+   because AppKit requires view changes on the main thread and Metal's
+   objects are not `Send`; a handle used from another thread is reported
+   invalid rather than made to work, since the alternative is a fault
+   somewhere else later.
+   What this does not yet do is draw the game. With no GL context the
+   engine gets as far as `CShaderDeviceDx8::CreateD3DDevice` and faults
+   inside `GLMContext`'s constructor, which is ToGL building the context
+   it translates Direct3D into. That is the expected wall and it is the
+   right one: the crash is in the component this work exists to delete,
+   not in anything around it. The path from here is to give the material
+   system a Metal device to talk to instead, and the offscreen world,
+   prop, lightmap and visibility work above is what it will draw through.
+   The default path is untouched: without `-metal` the engine creates its
+   GL context exactly as before and the smoke gate passes.
    Choosing where to look from turned out to matter as much as what to draw.
    A grid over the map's bounds lands mostly in the void around it and in
    the slivers the compiler leaves inside its walls, which are empty by its

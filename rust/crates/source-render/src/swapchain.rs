@@ -117,6 +117,54 @@ impl Swapchain {
         }
         Ok(())
     }
+
+    /// The same, for callers holding an `NSWindow` rather than its view.
+    ///
+    /// This exists so that the C++ side, which is where the engine's SDL
+    /// window lives, never has to send an Objective-C message itself: it
+    /// hands the window across and every message stays here.
+    ///
+    /// # Safety
+    /// `window` must be a live `NSWindow`, and this must be called on the
+    /// main thread.
+    pub unsafe fn attach_to_window(&self, window: *mut c_void) -> Result<()> {
+        if window.is_null() {
+            return Err(DeviceError::NoView);
+        }
+        let _pool = AutoreleasePool::new();
+        // SAFETY: the caller guarantees a live window on the main thread,
+        // and `-contentView` returns a view the window owns, which is
+        // borrowed only for the `attach_to_view` call below.
+        let view = unsafe { send_id(window.cast::<c_void>() as Id, selector(c"contentView")) };
+        if view.is_null() {
+            return Err(DeviceError::NoView);
+        }
+        unsafe { self.attach_to_view(view.cast()) }
+    }
+}
+
+/// How many pixels a point is on the display a window is on.
+///
+/// Read from the window rather than passed in, so that a caller placing
+/// an engine window does not have to know whether the display is Retina.
+///
+/// # Safety
+/// `window` must be a live `NSWindow`, on the main thread.
+pub unsafe fn backing_scale_of(window: *mut c_void) -> Option<f64> {
+    if window.is_null() {
+        return None;
+    }
+    let _pool = AutoreleasePool::new();
+    // SAFETY: the caller guarantees a live window, and
+    // `-backingScaleFactor` returns a `CGFloat`, which is `f64` here.
+    let scale = unsafe {
+        let send: extern "C" fn(Id, Sel) -> f64 = std::mem::transmute(msg_send_ptr());
+        send(
+            window.cast::<c_void>() as Id,
+            selector(c"backingScaleFactor"),
+        )
+    };
+    (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
 /// Creates a layer sized `width` by `height` points at `scale`.
