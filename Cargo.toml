@@ -25,6 +25,7 @@ members = [
     "rust/crates/source-soundemitter",
     "rust/crates/source-soundemittersystem",
     "rust/crates/source-scenefilecache",
+    "rust/crates/source-steamapi",
     "rust/crates/source-save",
     "rust/crates/source-studio",
     "rust/crates/source-vpk",

@@ -15,6 +15,31 @@ RUST_MODULES = ("scenefilecache", "soundemittersystem")
 # A module may export one more symbol than its factory when the platform ABI
 # forces a hand-written thunk that the linker will not hide.
 RUST_MODULE_EXTRA_EXPORTS = {"soundemittersystem": {"_source_add_wave_name"}}
+# Rust modules that are flat C rather than an interface, so there is no factory
+# to look for. Eight subprojects link `steam_api`, which means its whole export
+# set is the contract, and the set is small enough to hold here in full: a
+# missing name is a link that will fail, a new one is a claim the C++ never made.
+RUST_FLAT_MODULES = {
+    "steam_api": frozenset({
+        '_GetHSteamPipe', '_GetHSteamUser', '_SteamAPI_GetHSteamPipe',
+        '_SteamAPI_GetHSteamUser', '_SteamAPI_GetSteamInstallPath', '_SteamAPI_Init',
+        '_SteamAPI_InitSafe', '_SteamAPI_IsSteamRunning', '_SteamAPI_RegisterCallResult',
+        '_SteamAPI_RegisterCallback', '_SteamAPI_ReleaseCurrentThreadMemory',
+        '_SteamAPI_RestartAppIfNecessary', '_SteamAPI_RunCallbacks',
+        '_SteamAPI_SetBreakpadAppID', '_SteamAPI_SetMiniDumpComment',
+        '_SteamAPI_SetTryCatchCallbacks', '_SteamAPI_Shutdown',
+        '_SteamAPI_UnregisterCallResult', '_SteamAPI_UnregisterCallback',
+        '_SteamAPI_UseBreakpadCrashHandler', '_SteamAPI_WriteMiniDump', '_SteamApps',
+        '_SteamClient', '_SteamFriends', '_SteamGameServer_GetHSteamPipe',
+        '_SteamGameServer_GetHSteamUser', '_SteamGameServer_GetIPCCallCount',
+        '_SteamGameServer_InitSafe', '_SteamGameServer_RunCallbacks',
+        '_SteamGameServer_Shutdown', '_SteamHTTP', '_SteamInternal_ContextInit',
+        '_SteamInternal_CreateInterface', '_SteamMatchmaking', '_SteamMatchmakingServers',
+        '_SteamNetworking', '_SteamRemoteStorage', '_SteamScreenshots', '_SteamUser',
+        '_SteamUserStats', '_SteamUtils', '_Steam_GetHSteamUserCurrent',
+        '_Steam_RegisterInterfaceFuncs', '_Steam_RunCallbacks', '_g_pSteamClientGameServer',
+    }),
+}
 CPP_RUNTIME = ("libc++", "libtier0", "libvstdlib")
 
 
@@ -30,7 +55,7 @@ def audit(runtime, games, cargo_launcher=None):
     launcher = runtime / "hl2_launcher"
     shared = sorted((runtime / "bin").glob("*.dylib"))
     modules = [runtime / game / "bin" / f"lib{kind}.dylib" for game in games for kind in ("client", "server")]
-    required = [runtime / "bin" / f"lib{name}.dylib" for name in ("source_abi", "rust_engine_bridge", "launcher", "engine", "filesystem_stdio", "shaderapimetal", *RUST_MODULES)]
+    required = [runtime / "bin" / f"lib{name}.dylib" for name in ("source_abi", "rust_engine_bridge", "launcher", "engine", "filesystem_stdio", "shaderapimetal", *RUST_MODULES, *RUST_FLAT_MODULES)]
     for path in [launcher, *required, *modules]:
         if not path.is_file():
             raise ValueError(f"missing installed artifact: {path}")
@@ -49,11 +74,16 @@ def audit(runtime, games, cargo_launcher=None):
         if "_CreateInterface" not in exports[path]:
             raise ValueError(f"missing game interface factory: {path}")
 
-    for name in RUST_MODULES:
+    expected = {name: {"_CreateInterface"} | RUST_MODULE_EXTRA_EXPORTS.get(name, set()) for name in RUST_MODULES}
+    expected.update(RUST_FLAT_MODULES)
+    for name, allowed in expected.items():
         path = runtime / "bin" / f"lib{name}.dylib"
-        allowed = {"_CreateInterface"} | RUST_MODULE_EXTRA_EXPORTS.get(name, set())
-        if exports[path] != allowed:
-            raise ValueError(f"not the Rust {name} module, which exports {sorted(allowed)}: {path}")
+        if exports[path] != set(allowed):
+            raise ValueError(f"not the Rust {name} module, which exports {len(allowed)} symbols: {path}")
+        # For the interface modules the export set alone tells the two apart,
+        # since the C++ ones export more. A flat module's C++ original exports
+        # exactly the same names, so what distinguishes them is that it was
+        # compiled as C++ and links the C++ runtime, and this one does not.
         linked = [line.split()[0] for line in output("otool", "-L", str(path)).splitlines()[1:]]
         native = [library for library in linked if any(marker in library for marker in CPP_RUNTIME)]
         if native:

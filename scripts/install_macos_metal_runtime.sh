@@ -10,19 +10,27 @@ set -eu
 # folder is written to: its binaries keep working as they did, and its saves
 # are copied once so that a fault in this build cannot reach the originals.
 #
-#   install_macos_metal_runtime.sh <installed-build> <game-folder> <new-folder>
+#   install_macos_metal_runtime.sh <installed-build> <game-folder> <new-folder> [<name>]
 #
 # <installed-build> is what scripts/build-macos-arm64-rust.sh installs into,
 # out-rust-ci by default. Run it again after a rebuild to refresh the binaries;
 # settings and saves already in <new-folder> are left alone.
+#
+# <name> is what the app bundle is called, "Half-Life 2 Metal" by default. Give
+# a different one when the folder is a second runtime, so that the two are told
+# apart in the Dock rather than by which one was opened last.
 
 usage()
 {
-	echo "usage: $0 <installed-build> <game-folder> <new-folder>" >&2
+	echo "usage: $0 <installed-build> <game-folder> <new-folder> [<name>]" >&2
 	exit 2
 }
 
-[ "$#" -eq 3 ] || usage
+[ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
+APP_NAME=${4:-Half-Life 2 Metal}
+# The identifier has to differ too, or Launch Services treats two runtimes as
+# one application and opens whichever it saw most recently.
+BUNDLE_ID="com.ikarolaborda.hl2.$(printf '%s' "$APP_NAME" | tr '[:upper:] ' '[:lower:].' | sed 's/^half.life.2\.*//; s/^$/metal/')"
 
 BUILD=$(CDPATH= cd -- "$1" && pwd)
 GAME=$(CDPATH= cd -- "$2" && pwd)
@@ -110,13 +118,13 @@ chmod 755 "$DEST/run.sh"
 # launcher in the folder rather than a copy inside the bundle, because the
 # engine finds its libraries and content relative to the launcher it was
 # started as.
-APP="$DEST/Half-Life 2 Metal.app"
+APP="$DEST/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 if [ -f "$GAME/hl2/resource/game.icns" ]; then
 	cp -f "$GAME/hl2/resource/game.icns" "$APP/Contents/Resources/game.icns"
 fi
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-cat > "$APP/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -124,17 +132,17 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Half-Life 2 Metal</string>
+	<string>$APP_NAME</string>
 	<key>CFBundleExecutable</key>
-	<string>Half-Life 2 Metal</string>
+	<string>$APP_NAME</string>
 	<key>CFBundleIconFile</key>
 	<string>game.icns</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.ikarolaborda.hl2.metal</string>
+	<string>$BUNDLE_ID</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Half-Life 2 Metal</string>
+	<string>$APP_NAME</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -150,7 +158,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
-cat > "$APP/Contents/MacOS/Half-Life 2 Metal" <<EOF
+cat > "$APP/Contents/MacOS/$APP_NAME" <<EOF
 #!/bin/sh
 # Started from Finder, so there is no terminal: what the engine prints goes to
 # launcher.log beside the game.
@@ -160,7 +168,7 @@ if [ ! -x "\$GAME/hl2_launcher" ]; then
 	GAME="$DEST"
 fi
 if [ ! -x "\$GAME/hl2_launcher" ]; then
-	osascript -e 'display alert "Half-Life 2 Metal" message "Could not find hl2_launcher. Keep this app inside its game folder." as critical' >/dev/null 2>&1
+	osascript -e 'display alert "$APP_NAME" message "Could not find hl2_launcher. Keep this app inside its game folder." as critical' >/dev/null 2>&1
 	exit 1
 fi
 cd "\$GAME" || exit 1
@@ -168,7 +176,7 @@ export DYLD_LIBRARY_PATH="\$GAME/bin"
 export DYLD_FALLBACK_LIBRARY_PATH="\$GAME/bin:\$GAME/hl2/bin"
 exec "\$GAME/hl2_launcher" $LAUNCH_ARGS "\$@" > "\$GAME/launcher.log" 2>&1
 EOF
-chmod 755 "$APP/Contents/MacOS/Half-Life 2 Metal"
+chmod 755 "$APP/Contents/MacOS/$APP_NAME"
 
 echo "installed into $DEST"
 echo "start it with \"$DEST/run.sh\" or the app inside it"

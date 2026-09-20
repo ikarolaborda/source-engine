@@ -849,4 +849,45 @@ would: Rust versions of `CUtlVector`, `CUtlString`, `CUtlBuffer` or
 `KeyValues`. A module's interface passes far less than its implementation
 uses. Read the interface first.
 
+`source-steamapi` is the third, and it is the one that is not like them.
+`stub_steam/steam_api.cpp` is 185 lines standing in for Steamworks, which this
+tree does not ship: forty-four `extern "C"` functions that each return a
+constant, and one exported datum, `g_pSteamClientGameServer`. There is no
+interface, no `CreateInterface` and no table, so the crate is the stubs and
+nothing else, and `rust/verify_steam_api.sh` compares all forty-five exports
+against the C++ module built as an oracle.
+
+The difference that matters is that the engine *links* this one. `libengine`
+names twenty of its symbols, `libclient` nine and `libserver` eight, and eight
+subprojects carry `steam_api` in their `use`. Waf resolves a `use` name to a task
+generator and reads three things off its link task — the name to pass as `-l`,
+the directory of its first output to pass as `-L`, and the outputs themselves,
+which it copies into the consumer's `dep_nodes` so the linker is ordered after
+the producer. Drop the C++ subproject and there is no such task generator, and
+Waf falls through to its uselib path and leaves the library out of the link line
+without saying so. `rust/wscript` therefore registers a generator named
+`steam_api` whose link task is Cargo's; `RUST_MODULES` in the top-level `wscript`
+became a mapping at the same time, because this is the first module whose
+directory, `stub_steam`, is not its library name.
+
+Two things the gate had to prove that no dlopen'd module ever raises:
+
+- Every consumer used to record an absolute path into the build directory, which
+  is what the C++ module's install name was. Cargo's is `@rpath/libsteam_api.dylib`,
+  and nothing in this tree carries an `LC_RPATH`. Both resolve for the same
+  reason: the launcher puts the game's `bin` on `DYLD_LIBRARY_PATH`, which dyld
+  searches by leaf name before it resolves the recorded path. The linked half of
+  the gate asserts its own program has no `LC_RPATH` and then requires it to run,
+  so the day that stops being true the gate says so rather than the game.
+- The C++ declares every function with an empty parameter list while callers call
+  them through the real Steamworks prototypes, which take arguments. It is
+  well-defined only because the callee never reads them. `steam_api_link.cpp`
+  declares those real prototypes and calls both modules through them, arguments
+  and all, and requires the transcripts to match.
+
+`g_pSteamClientGameServer` needed no trick: a `#[no_mangle] pub static mut`
+initialised to null lands in `__DATA,__common`, the same section clang gives C's
+tentative definition, and the gate writes through the imported symbol and reads
+it back to check it is storage rather than a value.
+
 To replace the next module: dump its interfaces' tables

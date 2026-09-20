@@ -460,7 +460,16 @@ def pinned_rust_channel(conf):
 # build each walk them, and the dedicated server shares these modules. Only
 # macOS does this so far: that is where each module's differential gate runs,
 # and the table layout and member calling convention they rely on are clang's.
-RUST_MODULES = ['scenefilecache', 'soundemittersystem']
+#
+# Keyed by subproject directory, valued by the library file name Cargo produces,
+# because the two part company: `stub_steam` builds `steam_api`. The directory
+# is what the project lists below hold; the library name is what other
+# subprojects put in their `use`, and what rust/wscript installs.
+RUST_MODULES = {
+	'scenefilecache': 'scenefilecache',
+	'soundemittersystem': 'soundemittersystem',
+	'stub_steam': 'steam_api',
+}
 
 def drop_rust_modules(env):
 	if env.DEST_OS != 'darwin':
