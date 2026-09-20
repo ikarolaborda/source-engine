@@ -728,3 +728,125 @@ any fell back, so a silent regression to the legacy path cannot pass. Because si
 normally hands entity state to the client in process, the acceptance script
 turns `cl_localnetworkbackdoor` off to make the listen server encode real
 packets.
+
+## Engine modules that are Rust alone
+
+Everything above reaches Rust through the C ABI, from inside a C++ module that
+stays in the build. That moves ownership but never removes a translation unit.
+The other route replaces a module whole. Source's modules find each other
+through `CreateInterface` and talk through abstract classes, so a library that
+exports that one function and hands back an object with the right table of
+functions is, to its callers, the module it replaces.
+
+`source-cppabi` is that boundary written out by hand: `VTable` and `Object`
+lay out an interface a Rust module implements, `slot` calls into one a C++
+module still implements, and `appsystem`, `filesystem` and `tier0` hold what
+every module needs, which is `IAppSystem`'s five functions, a whole-file read
+through `IBaseFileSystem`, and the engine's `Warning` and `Error` looked up in
+the running process so that nothing links against `tier0`. The layout is the
+Itanium ABI's. Slot numbers are taken from `clang -Xclang
+-fdump-vtable-layouts` run with the real translation unit's flags, not from
+reading the header, and the differential harness asserts the same numbers from
+C++ member pointers.
+
+`source-scenefilecache` is the first module built that way. It is a `cdylib`
+named `scenefilecache`, exports `CreateInterface` and nothing else, links only
+the system library, and replaces `scenefilecache/SceneFileCache.cpp`. Its
+lookups live in `source_scene::cache`, which gates on what the native module
+gates on, a tag and a version, and then checks every offset the native module
+trusts; the strict `SceneImage` parser is deliberately not the gate, because an
+image another tool laid out differently plays natively and has to keep playing.
+A `--rust-engine` build on macOS drops the C++ subproject from both the game
+and the dedicated project lists and installs Cargo's library under the same
+name. Other platforms keep the C++ module until the gate runs there: the
+Windows slot order for overloads is the documented rule rather than a checked
+one, 32-bit Windows calls members as `thiscall`, and there is no `tier0`
+lookup off Unix. The
+C++ source stays in the tree for builds without Rust and as the oracle below.
+
+```sh
+sh rust/verify_scenefilecache.sh out-rust-allgames build-rust-allgames \
+  build-rust-allgames/cargo-target/release/libscenefilecache.dylib \
+  "<content>/hl2/hl2_pak_dir.vpk"
+```
+
+compiles the C++ module as an oracle, loads it and the Rust module into one
+process beside the real filesystem module, and requires every `ISceneFileCache`
+answer to match over a synthetic image, which carries stored scenes, both LZMA
+framings, a corrupt stream, gaps the strict parser refuses and names that take
+every ASCII normalization branch, and then over each shipped archive named.
+The image files scenes by checksum alone, so the names come from scraping the
+archives beside it; the gate prints how many scenes those reached, and
+separately decodes every scene, named or not, to the size it declares. The
+calls are ordinary C++ virtual calls, so a wrong table or calling convention
+fails there rather than in a game. Its factory imitates
+`CAppSystemGroup::FindSystem`, which puts a name it does not hold to every
+system in the group, the one being connected included; a module that holds a
+lock across `Connect` and takes it again in `QueryInterface` hangs the engine
+at startup, and hangs the harness first. It runs the lifecycle twice, because
+the engine rebuilds the group for each mod without unloading the module. A
+separate process checks that an image with the wrong version still ends in the
+engine's fatal error, and another that it does so when `tier0` was loaded from
+a directory dyld would not search: asking dyld for the library by name finds
+nothing there, which an earlier build of the module turned into a line on
+stderr and a game that carried on without scenes.
+
+Known differences from the C++, none of which a well-formed image reaches and
+most of which the harness therefore does not exercise:
+
+- Offsets that leave the image are answered as not found instead of read, and
+  a directory that does not fit in the file, or a file shorter than a header,
+  is the same fatal error as a wrong tag, where the C++ carries on into memory
+  it does not own.
+- A compressed scene whose stream is corrupt reports success and its declared
+  size in both, since the native module ignores the decoder's failure, but the
+  native decoder leaves a partial decode in the caller's buffer and this one
+  leaves it untouched. A stream that decodes to the right length and then has
+  compressed bytes left over is also refused here and accepted natively.
+- A scene counts as compressed only if all seventeen bytes of the LZMA header
+  fit in the image; natively the four-byte tag is enough.
+- A declared size of 2^31 or more is sign-extended natively, through an `int`,
+  and zero-extended here.
+- On a miss, the native module stores a null through the destination pointer
+  even when the caller said it has no bytes; this one writes only when there is
+  room.
+- `Disconnect` forgets the filesystem here and leaves a stale pointer natively,
+  so a `Reload` between `Disconnect` and the next `Connect` finds no image.
+- Names are lowercased as ASCII. `V_strlower` hands bytes of 0x80 and above to
+  the C library, which leaves them alone in the "C" locale the macOS launcher
+  runs in; under a locale that maps them, the two would file a name differently.
+
+A trap worth knowing before writing the next harness: with `DYLD_LIBRARY_PATH`
+set, dyld resolves `dlopen` of a full path by leaf name in those directories
+first. Two modules under test that share the installed module's file name both
+load as the installed one, and everything passes. The harness copies them to
+unique names and asserts with `dladdr` that each object lives in the library
+asked for.
+
+`source-soundemittersystem` is the second, and it went the same way:
+`source-soundemitter` holds what a sound script means, in `Vec`, `String` and
+`HashMap`, and the `cdylib` beside it holds the table of forty-five functions
+the engine calls and the two packed structures the interface passes. Those two
+are reproduced exactly, because `CSoundParametersInternal`'s accessors are
+inline in the header: every caller has a compiled-in copy of the layout,
+including the trick where a single wave is stored in the bytes of the array
+pointer rather than behind it. `rust/verify_soundemitter.sh` builds the C++
+module as an oracle and compares every sound either module loaded, by name,
+across the parameters, the wave lists, the script each came from, the actor
+genders and the manifest checksum: 82,303 comparisons over Half-Life 2's 5,140
+sounds agree.
+
+Two things that module met and the next one will too. `CUtlSymbol` has a
+copy constructor, which makes it non-trivial for the purposes of calls, so a
+function returning one returns it in memory: on AArch64 the destination
+arrives in `x8`, which no Rust signature can name, and a four-instruction
+`global_asm!` thunk moves it into an argument. And the native table's handles
+are `uint16`, so an `int` index that does not fit is truncated rather than
+rejected — the gate found that difference before a tool could.
+
+What neither module needed, despite an earlier note in the ledger saying it
+would: Rust versions of `CUtlVector`, `CUtlString`, `CUtlBuffer` or
+`KeyValues`. A module's interface passes far less than its implementation
+uses. Read the interface first.
+
+To replace the next module: dump its interfaces' tables

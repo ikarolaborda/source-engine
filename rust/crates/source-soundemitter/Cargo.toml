@@ -1,16 +1,12 @@
 [package]
-name = "source-scene"
+name = "source-soundemitter"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-source-binary = { path = "../source-binary" }
-source-compress = { path = "../source-compress" }
-
-[dev-dependencies]
-lzma-rs = "=0.3.0"
+source-keyvalues = { path = "../source-keyvalues" }
 
 [lints]
 workspace = true

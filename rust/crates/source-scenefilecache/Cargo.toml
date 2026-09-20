@@ -1,0 +1,18 @@
+[package]
+name = "source-scenefilecache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The engine loads this module by the name the C++ one had.
+[lib]
+name = "scenefilecache"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+source-cppabi = { path = "../source-cppabi" }
+source-scene = { path = "../source-scene" }
+
+[lints]
+workspace = true

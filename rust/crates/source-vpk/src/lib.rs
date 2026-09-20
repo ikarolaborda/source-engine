@@ -3,7 +3,6 @@
 use source_binary::{Reader, Writer};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::OnceLock;
 
 pub const VPK_SIGNATURE: u32 = 0x55aa_1234;
 pub const VPK_VERSION_1: u32 = 1;
@@ -587,25 +586,7 @@ impl Builder {
     }
 }
 
-pub fn crc32(bytes: &[u8]) -> u32 {
-    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-    let table = TABLE.get_or_init(|| {
-        let mut table = [0u32; 256];
-        for (index, slot) in table.iter_mut().enumerate() {
-            let mut value = index as u32;
-            for _ in 0..8 {
-                value = (value >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(value & 1)));
-            }
-            *slot = value;
-        }
-        table
-    });
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc = (crc >> 8) ^ table[((crc ^ u32::from(*byte)) & 0xff) as usize];
-    }
-    !crc
-}
+pub use source_binary::crc32;
 
 #[cfg(test)]
 mod tests {

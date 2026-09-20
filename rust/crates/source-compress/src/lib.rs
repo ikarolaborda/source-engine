@@ -1,4 +1,5 @@
-//! Source compressed buffers: LZSS here and the SNAP codec in [`snappy`].
+//! Source compressed buffers: LZSS here, the SNAP codec in [`snappy`] and the
+//! LZMA envelope in [`lzma`].
 //!
 //! The layout matches `tier1/lzss.cpp`: an eight-byte header holding the
 //! `LZSS` tag and the uncompressed length, then groups of one command byte
@@ -14,6 +15,7 @@
 
 use std::fmt;
 
+pub mod lzma;
 pub mod snappy;
 
 /// `LZSS_ID`, which is the tag `LZSS` as it appears in the first four bytes.

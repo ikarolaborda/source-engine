@@ -11,10 +11,12 @@ import verify_rust_allgames_install as verifier
 
 class AuditTests(unittest.TestCase):
     def run_audit(self, *, arch="arm64", missing_export=None, imported=None,
-                  missing_file=None, missing_factory=False, wrong_launcher=False):
+                  missing_file=None, missing_factory=False, wrong_launcher=False,
+                  stale_module_exports=None, stale_module_links=None):
         runtime = Path("runtime")
         shared = [runtime / "bin" / f"lib{name}.dylib" for name in (
-            "source_abi", "rust_engine_bridge", "launcher", "engine", "filesystem_stdio", "shaderapimetal"
+            "source_abi", "rust_engine_bridge", "launcher", "engine", "filesystem_stdio", "shaderapimetal",
+            "scenefilecache", "soundemittersystem"
         )]
         abi_exports = {
             "_source_host_run_app_system_group", "_source_host_app_group_startup", "_source_host_app_group_shutdown"
@@ -24,6 +26,12 @@ class AuditTests(unittest.TestCase):
         def output(*args):
             if args[0] == "lipo":
                 return arch + "\n"
+            if args[0] == "otool":
+                return args[2] + ":\n\t" + (stale_module_links or "/usr/lib/libSystem.B.dylib") + " (compatibility version 1.0.0)\n"
+            if args[1] == "-gU" and args[2].endswith("libscenefilecache.dylib") and stale_module_exports:
+                return "".join(f"000 T {name}\n" for name in stale_module_exports)
+            if args[1] == "-gU" and args[2].endswith("libsoundemittersystem.dylib"):
+                return "000 T _CreateInterface\n000 T _source_add_wave_name\n"
             if args[1] == "-u":
                 return (imported + "\n") if imported else ""
             if args[2].endswith("libsource_abi.dylib"):
@@ -67,6 +75,14 @@ class AuditTests(unittest.TestCase):
     def test_rejects_missing_game_factory(self):
         with self.assertRaisesRegex(ValueError, "missing game interface factory"):
             self.run_audit(missing_factory=True)
+
+    def test_rejects_a_cpp_build_left_where_a_rust_module_belongs(self):
+        with self.assertRaisesRegex(ValueError, "not the Rust scenefilecache module"):
+            self.run_audit(stale_module_exports=("_CreateInterface", "__ZN15CSceneFileCache4InitEv"))
+        with self.assertRaisesRegex(ValueError, "links C\\+\\+ libraries"):
+            self.run_audit(stale_module_links="@rpath/libtier0.dylib")
+        with self.assertRaisesRegex(ValueError, "missing installed artifact"):
+            self.run_audit(missing_file="libscenefilecache.dylib")
 
     def test_rejects_wrong_launcher(self):
         with self.assertRaisesRegex(ValueError, "installed launcher differs"):

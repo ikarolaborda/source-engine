@@ -454,6 +454,20 @@ def pinned_rust_channel(conf):
 		conf.fatal('rust-toolchain.toml declares no channel')
 	return match.group(1)
 
+# Engine modules the Cargo workspace builds whole, with no C++ in them. A Rust
+# build gets each from rust/wscript under the same file name, so the C++
+# subproject leaves the build. Every list is filtered because configure and
+# build each walk them, and the dedicated server shares these modules. Only
+# macOS does this so far: that is where each module's differential gate runs,
+# and the table layout and member calling convention they rely on are clang's.
+RUST_MODULES = ['scenefilecache', 'soundemittersystem']
+
+def drop_rust_modules(env):
+	if env.DEST_OS != 'darwin':
+		return
+	for name in projects:
+		projects[name] = [project for project in projects[name] if project not in RUST_MODULES]
+
 def check_pinned_rust_toolchain(conf):
 	'''Fails configuration when cargo or rustc is not the pinned toolchain.
 
@@ -679,6 +693,7 @@ def configure(conf):
 
 	if conf.env.RUST_ENGINE:
 		conf.add_subproject(['rust'])
+		drop_rust_modules(conf.env)
 
 	if conf.options.TESTS:
 		conf.add_subproject(projects['tests'])
@@ -704,6 +719,7 @@ def build(bld):
 
 	if bld.env.RUST_ENGINE:
 		bld.add_subproject(['rust'])
+		drop_rust_modules(bld.env)
 
 	if bld.env.TESTS:
 		bld.add_subproject(projects['tests'])

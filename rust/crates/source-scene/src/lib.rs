@@ -1,4 +1,7 @@
-//! Parser for Source `scenes/scenes.image` caches and compiled-scene envelopes.
+//! Parser for Source `scenes/scenes.image` caches and compiled-scene envelopes,
+//! and in [`cache`] the lookups the running game makes against a loaded image.
+
+pub mod cache;
 
 use source_binary::Reader;
 use std::fmt;

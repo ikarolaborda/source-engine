@@ -82,6 +82,9 @@ dependencies = [
 [[package]]
 name = "source-compress"
 version = "0.1.0"
+dependencies = [
+ "lzma-rs",
+]
 
 [[package]]
 name = "source-console"
@@ -103,6 +106,10 @@ dependencies = [
  "source-vpk",
  "source-vtf",
 ]
+
+[[package]]
+name = "source-cppabi"
+version = "0.1.0"
 
 [[package]]
 name = "source-d3d9"
@@ -201,7 +208,33 @@ dependencies = [
 name = "source-scene"
 version = "0.1.0"
 dependencies = [
+ "lzma-rs",
  "source-binary",
+ "source-compress",
+]
+
+[[package]]
+name = "source-scenefilecache"
+version = "0.1.0"
+dependencies = [
+ "source-cppabi",
+ "source-scene",
+]
+
+[[package]]
+name = "source-soundemitter"
+version = "0.1.0"
+dependencies = [
+ "source-keyvalues",
+]
+
+[[package]]
+name = "source-soundemittersystem"
+version = "0.1.0"
+dependencies = [
+ "source-binary",
+ "source-cppabi",
+ "source-soundemitter",
 ]
 
 [[package]]

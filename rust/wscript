@@ -6,6 +6,10 @@ from waflib import Utils
 
 top = '.'
 
+# Kept in step with the subprojects the top-level wscript drops for a Rust
+# build, which it does on macOS alone.
+RUST_MODULES = ['scenefilecache', 'soundemittersystem']
+
 def options(opt):
 	return
 
@@ -17,17 +21,26 @@ def build(bld):
 	profile_dir = target_dir.make_node('release')
 
 	if bld.env.DEST_OS == 'darwin':
-		dynamic_name = 'libsource_abi.dylib'
+		dynamic_pattern = 'lib%s.dylib'
 	elif bld.env.DEST_OS == 'win32':
-		dynamic_name = 'source_abi.dll'
+		dynamic_pattern = '%s.dll'
 	else:
-		dynamic_name = 'libsource_abi.so'
+		dynamic_pattern = 'lib%s.so'
 
-	outputs = [profile_dir.make_node(dynamic_name)]
+	abi = profile_dir.make_node(dynamic_pattern % 'source_abi')
+	# Engine modules that are Rust alone. Each takes the file name of the C++
+	# module it replaces, which the top-level wscript leaves out of the build.
+	modules = []
+	if bld.env.DEST_OS == 'darwin':
+		modules = [profile_dir.make_node(dynamic_pattern % name) for name in RUST_MODULES]
+	launcher = None
+
+	outputs = [abi] + modules
 	if bld.env.DEST_OS != 'win32':
 		outputs.append(profile_dir.make_node('libsource_abi.a'))
 	if bld.env.DEST_OS == 'darwin':
-		outputs.append(profile_dir.make_node('source-launcher'))
+		launcher = profile_dir.make_node('source-launcher')
+		outputs.append(launcher)
 
 	sources = bld.path.ant_glob('**/*.rs **/Cargo.toml')
 	sources.append(bld.srcnode.find_node('Cargo.toml'))
@@ -52,7 +65,7 @@ def build(bld):
 		target = outputs,
 		always = False,
 	)
-	bld.install_files(bld.env.LIBDIR, outputs[0])
-	if bld.env.DEST_OS == 'darwin':
+	bld.install_files(bld.env.LIBDIR, [abi] + modules, chmod=Utils.O755)
+	if launcher:
 		bld.install_as(os.path.join(bld.env.BINDIR, 'hl2_launcher'),
-			outputs[-1], chmod=Utils.O755)
+			launcher, chmod=Utils.O755)

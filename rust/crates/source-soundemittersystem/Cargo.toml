@@ -1,0 +1,19 @@
+[package]
+name = "source-soundemittersystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The engine loads this module by the name the C++ one had.
+[lib]
+name = "soundemittersystem"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+source-binary = { path = "../source-binary" }
+source-cppabi = { path = "../source-cppabi" }
+source-soundemitter = { path = "../source-soundemitter" }
+
+[lints]
+workspace = true

@@ -1,12 +1,9 @@
 [package]
-name = "source-compress"
+name = "source-cppabi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
-license-file = "../../../LICENSE"
-
-[dependencies]
-lzma-rs = "=0.3.0"
 
 [lints]
 workspace = true
