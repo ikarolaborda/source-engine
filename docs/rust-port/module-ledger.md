@@ -66,13 +66,23 @@ Sizes are lines of C++ in the module's own directory. "Boundary" is what makes
 it harder than `scenefilecache`, which had eleven slots, plain C types and one
 dependency.
 
+Sizes are lines of C++ in the module's own directory. "Boundary" is what makes
+it harder than the two already done. The first two rows were measured on
+2026-09-20 with the same tools the ports use, so the next round can start from
+them rather than re-deriving them.
+
 | Module | C++ | Boundary |
 | --- | --- | --- |
-| `stub_steam` | 185 | Exports flat `SteamAPI_*` functions rather than an interface; no table at all. |
+| `stub_steam` | 185 | **Measured:** 45 exports, every one `extern "C"`, none mangled; all of them stubs that return a constant. No interface and no table at all, so it exercises a pattern neither port has: a module that is nothing but flat C functions. `libengine` imports 19 of them, `libclient` 9, `libserver` 7. The smallest whole module in the tree. |
+| `inputsystem` | 4,017 | **Measured:** `IInputSystem` has 52 virtual functions of its own beside `IAppSystem`'s 5, and the only types crossing are `ButtonCode_t` and `AnalogCode_t`, which are enums, and `InputEvent_t`, which is plain data — no containers, as with `soundemittersystem`. The work is not the boundary but what sits behind it: the module owns SDL2 event pumping, the button-code translation tables and joystick handling, and it links `SDL2` and `steam_api`. SDL is a third-party library that stays after the C++ engine is gone, so binding it is a real boundary rather than migration scaffolding. |
 | `vpklib` | 2,089 | A static library of C++ classes used directly by `filesystem`, not an interface; goes with the filesystem module. |
-| `inputsystem` | 4,017 | `IInputSystem` is plain types, but the module owns SDL event pumping and the button-code tables. `source-input` already holds part of it. |
 | `datacache` | 5,376 | `IDataCache`/`IMDLCache` hand out `studiohdr_t` and vertex data pointers that the renderer and physics keep. |
-| `filesystem` | 8 files | `IFileSystem` declares 108 virtual functions of its own, beside `IAppSystem`'s 5 and `IBaseFileSystem`'s 17 (counted with the same clang dump), and passes `CUtlBuffer`; most of the behaviour behind it is already Rust, which makes it the first large module worth taking whole. |
+| `filesystem` | 8 files | `IFileSystem` declares 108 virtual functions of its own, beside `IAppSystem`'s 5 and `IBaseFileSystem`'s 17 (counted with the same clang dump), and passes `CUtlBuffer`; most of the behaviour behind it is already Rust, which makes it the first large module worth taking whole. It is also what would retire the one C++ call the two finished modules still make. |
+
+Suggested order: `stub_steam`, because it is an afternoon and it proves the
+flat-C pattern; then `inputsystem`, which is the first port that removes a
+four-figure number of lines and the first to bind a library that is meant to
+stay.
 
 An earlier draft of this file named `soundemittersystem` as the module that
 would force layout-compatible `CUtlVector`, `CUtlString`, `CUtlBuffer` and
