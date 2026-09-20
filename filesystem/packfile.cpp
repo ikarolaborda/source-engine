@@ -9,9 +9,15 @@
 #include "zip_utils.h"
 #include "tier0/basetypes.h"
 #include "tier1/convar.h"
+#if !defined( SOURCE_RUST_ENGINE )
 #include "tier1/lzmaDecoder.h"
+#endif
 #include "tier1/utlbuffer.h"
 #include "tier1/generichash.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "rust_engine_bridge.h"
+#include <atomic>
+#endif
 
 ConVar fs_monitor_read_from_pack( "fs_monitor_read_from_pack", "0", 0, "0:Off, 1:Any, 2:Sync only" );
 
@@ -21,10 +27,11 @@ ConVar fs_monitor_read_from_pack( "fs_monitor_read_from_pack", "0", 0, "0:Off, 1
 
 CPackFile::CPackFile()
 {
-	m_FileLength = 0;
 	m_hPackFileHandleFS = NULL;
 	m_fs = NULL;
+#if !defined( SOURCE_RUST_ENGINE )
 	m_nBaseOffset = 0;
+#endif
 	m_bIsMapPath = false;
 	m_lPackFileTime = 0L;
 	m_refCount = 0;
@@ -66,6 +73,45 @@ int CPackFile::GetSectorSize()
 	}
 }
 
+#if defined( SOURCE_RUST_ENGINE )
+// Only an ABI adapter: Rust owns bytes, decoding and cursor state. Keep the
+// pack handle type so native ReadLine retains its FT_PACK_TEXT CRLF behavior.
+class CRustPackFileHandle : public CPackFileHandle
+{
+public:
+	CRustPackFileHandle( uint64 file, uint64 absoluteOffset )
+		: m_File( file ), m_AbsoluteOffset( absoluteOffset ) {}
+	~CRustPackFileHandle() OVERRIDE { source_rust_bridge_file_close( m_File ); }
+	int Read( void *buffer, int destSize, int bytes ) OVERRIDE
+	{
+		if ( bytes <= 0 || !buffer ) return 0;
+		if ( destSize >= 0 && bytes > destSize ) bytes = destSize;
+		uint64 read = 0;
+		return source_rust_bridge_file_read( m_File, buffer, bytes, &read ) == SOURCE_ABI_OK ? static_cast<int>( read ) : 0;
+	}
+	int Seek( int offset, int whence ) OVERRIDE
+	{
+		uint64 position = 0;
+		return source_rust_bridge_file_seek( m_File, offset, whence, &position ) == SOURCE_ABI_OK ? static_cast<int>( position ) : Tell();
+	}
+	int Tell() OVERRIDE
+	{
+		uint64 position = 0;
+		return source_rust_bridge_file_tell( m_File, &position ) == SOURCE_ABI_OK ? static_cast<int>( position ) : 0;
+	}
+	int Size() OVERRIDE
+	{
+		uint64 size = 0;
+		return source_rust_bridge_open_file_size( m_File, &size ) == SOURCE_ABI_OK ? static_cast<int>( size ) : 0;
+	}
+	void SetBufferSize( int ) OVERRIDE {}
+	int GetSectorSize() OVERRIDE { return 1; }
+	int64 AbsoluteBaseOffset() OVERRIDE { return m_AbsoluteOffset; }
+private:
+	uint64 m_File;
+	uint64 m_AbsoluteOffset;
+};
+#else
 // Read a bit of the file from the pack file:
 int CZipPackFileHandle::Read( void* pBuffer, int nDestSize, int nBytes )
 {
@@ -107,6 +153,7 @@ int CZipPackFileHandle::Seek( int nOffset, int nWhence )
 
 	return m_nFilePointer;
 }
+#endif
 
 //-----------------------------------------------------------------------------
 // Open a file inside of a pack file.
@@ -120,6 +167,19 @@ CFileHandle *CZipPackFile::OpenFile( const char *pFileName, const char *pOptions
 	// find the file's location in the pack
 	if ( GetFileInfo( pFileName, nIndex, nPosition, nOriginalSize, nCompressedSize, nCompressionMethod ) )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		uint64 file = 0, size = 0, absoluteOffset = 0;
+		const SourceAbiStatus status = source_rust_bridge_file_open_pak(
+			m_nRustPakIndex, nIndex, &file, &size, &absoluteOffset );
+		if ( status != SOURCE_ABI_OK )
+		{
+			Warning( "Rust pack payload rejected: %s/%s (status %d)\n", m_ZipName.String(), pFileName, status );
+			return NULL;
+		}
+		CPackFileHandle *ph = new CRustPackFileHandle( file, absoluteOffset );
+		static std::atomic<bool> reported( false );
+		if ( !reported.exchange( true ) ) Msg( "Rust pack payload handles active\n" );
+#else
 		m_mutex.Lock();
 #if defined( SUPPORT_PACKED_STORE )
 		if ( m_nOpenFiles == 0 && m_hPackFileHandleFS == NULL && !m_hPackFileHandleVPK )
@@ -144,6 +204,7 @@ CFileHandle *CZipPackFile::OpenFile( const char *pFileName, const char *pOptions
 			AssertMsg( nCompressionMethod == ZIP_COMPRESSION_NONE, "Unsupported compression type in zip pack file" );
 			ph = new CZipPackFileHandle( this, nPosition, nOriginalSize, nIndex );
 		}
+#endif
 		CFileHandle *fh = new CFileHandle( m_fs );
 		fh->m_pPackFileHandle = ph;
 		fh->m_nLength = nOriginalSize;
@@ -172,6 +233,11 @@ CFileHandle *CZipPackFile::OpenFile( const char *pFileName, const char *pOptions
 //-----------------------------------------------------------------------------
 ZIP_PreloadDirectoryEntry* CZipPackFile::GetPreloadEntry( int nEntryIndex )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust indexes the actual archive payload; optional native preload caches
+	// are not interpreted or needed to serve desktop ZIPs.
+	return NULL;
+#else
 	if ( !m_pPreloadHeader )
 	{
 		return NULL;
@@ -184,11 +250,13 @@ ZIP_PreloadDirectoryEntry* CZipPackFile::GetPreloadEntry( int nEntryIndex )
 	}
 
 	return &m_pPreloadDirectory[m_PackFiles[nEntryIndex].m_nPreloadIdx];
+#endif
 }
 
 //-----------------------------------------------------------------------------
 //	Read a file from the pack
 //-----------------------------------------------------------------------------
+#if !defined( SOURCE_RUST_ENGINE )
 int CZipPackFile::ReadFromPack( int nEntryIndex, void* pBuffer, int nDestBytes, int nBytes, int64 nOffset )
 {
 	if ( nEntryIndex >= 0 )
@@ -202,6 +270,7 @@ int CZipPackFile::ReadFromPack( int nEntryIndex, void* pBuffer, int nDestBytes, 
 		// It comes into play for files out of the embedded bsp zip,
 		// this hackery is a pre-bias expecting ReadFromPack() do a symmetric post bias, yuck.
 
+#if !defined( SOURCE_RUST_ENGINE )
 		// Attempt to satisfy request from possible preload section, otherwise fall through
 		// A preload entry may be compressed
 		ZIP_PreloadDirectoryEntry *pPreloadEntry = GetPreloadEntry( nEntryIndex );
@@ -254,6 +323,7 @@ int CZipPackFile::ReadFromPack( int nEntryIndex, void* pBuffer, int nDestBytes, 
 				return nBytes;
 			}
 		}
+#endif
 	}
 
 #if defined ( _X360 )
@@ -298,12 +368,27 @@ int CZipPackFile::ReadFromPack( int nEntryIndex, void* pBuffer, int nDestBytes, 
 
 	return nBytesRead;
 }
+#endif
 
 //-----------------------------------------------------------------------------
 //	Gets size, position, and index for a file in the pack.
 //-----------------------------------------------------------------------------
 bool CZipPackFile::GetFileInfo( const char *pFileName, int &nBaseIndex, int64 &nFileOffset, int &nOriginalSize, int &nCompressedSize, unsigned short &nCompressionMethod )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !pFileName )
+		return false;
+	SourceAbiSlice path = { reinterpret_cast<const uint8_t *>( pFileName ), static_cast<uint64_t>( Q_strlen( pFileName ) ) };
+	SourceAbiPakEntry entry = {};
+	if ( source_rust_bridge_pak_index_find( m_nRustPakIndex, path, &entry ) != SOURCE_ABI_OK )
+		return false;
+	nBaseIndex = entry.index;
+	nFileOffset = entry.data_offset;
+	nOriginalSize = entry.length;
+	nCompressedSize = entry.compressed_length;
+	nCompressionMethod = entry.method;
+	return true;
+#else
 	char szCleanName[MAX_FILEPATH];
 	Q_strncpy( szCleanName, pFileName, sizeof( szCleanName ) );
 #ifdef _WIN32
@@ -337,17 +422,30 @@ bool CZipPackFile::GetFileInfo( const char *pFileName, int &nBaseIndex, int64 &n
 	}
 
 	return false;
+#endif
 }
 
 bool CZipPackFile::IndexToFilename( int nIndex, char *pBuffer, int nBufferSize )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !pBuffer || nBufferSize <= 0 )
+		return false;
+	SourceAbiPakEntry entry = {};
+	uint64_t written = 0;
+	if ( nIndex >= 0 && source_rust_bridge_pak_index_entry( m_nRustPakIndex, nIndex,
+		&entry, reinterpret_cast<uint8_t *>( pBuffer ), nBufferSize - 1, &written ) == SOURCE_ABI_OK )
+	{
+		pBuffer[written] = '\0';
+		return true;
+	}
+#else
 	AssertMsg( nIndex >= 0 && nIndex < m_PackFiles.Count(), "Out of bounds vector access in IndexToFilename" );
 	if ( nIndex >= 0 )
 	{
 		m_fs->String( m_PackFiles[nIndex].m_hFileName, pBuffer, nBufferSize );
 		return true;
 	}
-
+#endif
 	Q_strncpy( pBuffer, "unknown", nBufferSize );
 
 	return false;
@@ -370,6 +468,35 @@ bool CZipPackFile::ContainsFile( const char *pFileName )
 //-----------------------------------------------------------------------------
 void CZipPackFile::GetFileAndDirLists( const char *pRawWildCard, CUtlStringList &outDirnames, CUtlStringList &outFilenames, bool bSortedOutput )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust owns normalization, matching, directory synthesis, dedup and ordering.
+	// These internal callers supply empty lists; this adapter only copies names.
+	Assert( outDirnames.Count() == 0 && outFilenames.Count() == 0 );
+	char name[1025]; // source-pak's validated maximum entry path plus NUL.
+	uint64 written = 0, find = 0;
+	uint32 isDirectory = 0;
+	SourceAbiSlice pattern = { reinterpret_cast<const uint8_t *>( pRawWildCard ), static_cast<uint64>( V_strlen( pRawWildCard ) ) };
+	SourceAbiMutSlice output = { reinterpret_cast<uint8_t *>( name ), sizeof( name ) - 1 };
+	SourceAbiStatus status = source_rust_bridge_find_first_pak( m_nRustPakIndex,
+		pattern, output, &written, &isDirectory, &find );
+	while ( status == SOURCE_ABI_OK )
+	{
+		name[written] = '\0';
+		// Native FindData has a fixed MAX_PATH basename buffer. Never return a
+		// truncated, different filename; the Rust ABI can expose the full name.
+		if ( V_strlen( V_UnqualifiedFileName( name ) ) < MAX_PATH )
+		{
+			char *copy = new char[written + 1];
+			V_memcpy( copy, name, written + 1 );
+			if ( isDirectory ) outDirnames.AddToTail( copy );
+			else outFilenames.AddToTail( copy );
+		}
+		status = source_rust_bridge_find_next( find, name, sizeof( name ) - 1, &written, &isDirectory );
+	}
+	if ( find ) source_rust_bridge_find_close( find );
+	if ( status != SOURCE_ABI_NOT_FOUND )
+		Warning( "Rust pack wildcard rejected: %s (status %d)\n", pRawWildCard, status );
+#else
 	// See also: VPKlib function with same name.
 
 	CUtlDict<int,int> AddedDirectories; // Used to remove duplicate paths
@@ -431,10 +558,15 @@ void CZipPackFile::GetFileAndDirLists( const char *pRawWildCard, CUtlStringList 
 
 	// For each candidate we attempt to walk up its path and consider the directories it represents as well (the
 	// directories in a zip only exist in that files contain them, there are no empty directories)
+#if defined( SOURCE_RUST_ENGINE )
+	for ( uint32 filesIdx = 0; filesIdx < m_nRustPakEntries; ++filesIdx )
+#else
 	FOR_EACH_VEC( m_PackFiles, filesIdx )
+#endif
 	{
 		char szCandidateName[MAX_PATH] = { 0 };
-		IndexToFilename( filesIdx, szCandidateName, sizeof( szCandidateName ));
+		if ( !IndexToFilename( filesIdx, szCandidateName, sizeof( szCandidateName )) )
+			continue;
 
 		if ( !szCandidateName[0] )
 		{
@@ -526,6 +658,7 @@ void CZipPackFile::GetFileAndDirLists( const char *pRawWildCard, CUtlStringList 
 		outDirnames.Sort( &CUtlStringList::SortFunc );
 		outFilenames.Sort( &CUtlStringList::SortFunc );
 	}
+#endif
 }
 
 
@@ -534,6 +667,9 @@ void CZipPackFile::GetFileAndDirLists( const char *pRawWildCard, CUtlStringList 
 //-----------------------------------------------------------------------------
 void CZipPackFile::SetupPreloadData()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	return;
+#else
 	if ( m_pPreloadHeader || !m_nPreloadSectionSize )
 	{
 		// already loaded or not available
@@ -579,6 +715,7 @@ void CZipPackFile::SetupPreloadData()
 
 	// set the preload data base
 	m_pPreloadData = (byte *)m_pPreloadRemapTable + m_pPreloadHeader->DirectoryEntries * sizeof( unsigned short );
+#endif
 }
 
 void CZipPackFile::DiscardPreloadData()
@@ -606,6 +743,28 @@ void CZipPackFile::DiscardPreloadData()
 //-----------------------------------------------------------------------------
 bool CZipPackFile::Prepare( int64 fileLen, int64 nFileOfs )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_nRustPakIndex )
+		return false;
+	SourceAbiSlice path = { reinterpret_cast<const uint8_t *>( m_ZipName.String() ),
+		static_cast<uint64_t>( V_strlen( m_ZipName.String() ) ) };
+	SourceAbiPakArchiveInfo info = {};
+	const SourceAbiStatus status = source_rust_bridge_pak_index_open_archive( path,
+		m_bIsMapPath ? 1 : 0, &m_nRustPakIndex, &info );
+	if ( status != SOURCE_ABI_OK )
+	{
+		if ( status != SOURCE_ABI_NOT_FOUND )
+			Warning( "Rust pack index rejected: %s (status %d)\n", m_ZipName.String(), status );
+		return false;
+	}
+	m_lPackFileTime = static_cast<long>( info.modified_seconds );
+	m_nRustPakEntries = info.entry_count;
+	Msg( "Rust archive range discovered: %s (%s, offset %llu, length %llu)\n",
+		m_ZipName.String(), m_bIsMapPath ? "BSP" : "ZIP",
+		static_cast<unsigned long long>( info.offset ), static_cast<unsigned long long>( info.length ) );
+	Msg( "Rust pack index active: %s (%u entries)\n", m_ZipName.String(), m_nRustPakEntries );
+	return true;
+#else
 	if ( !fileLen || fileLen < sizeof( ZIP_EndOfCentralDirRecord ) )
 	{
 		// nonsense zip
@@ -615,7 +774,6 @@ bool CZipPackFile::Prepare( int64 fileLen, int64 nFileOfs )
 	// Pack files are always little-endian
 	m_swap.ActivateByteSwapping( IsX360() );
 
-	m_FileLength = fileLen;
 	m_nBaseOffset = nFileOfs;
 
 	ZIP_EndOfCentralDirRecord rec = { 0 };
@@ -793,6 +951,7 @@ bool CZipPackFile::Prepare( int64 fileLen, int64 nFileOfs )
 	m_PackFiles.RedoSort();
 
 	return bSuccess;
+#endif
 }
 
 
@@ -800,8 +959,14 @@ bool CZipPackFile::Prepare( int64 fileLen, int64 nFileOfs )
 //
 //-----------------------------------------------------------------------------
 CZipPackFile::CZipPackFile( CBaseFileSystem* fs, void *pSection )
+#if !defined( SOURCE_RUST_ENGINE )
  : m_PackFiles()
+#endif
 {
+#if defined( SOURCE_RUST_ENGINE )
+	m_nRustPakIndex = 0;
+	m_nRustPakEntries = 0;
+#endif
 	m_fs = fs;
 	m_pPreloadDirectory = NULL;
 	m_pPreloadData = NULL;
@@ -817,6 +982,10 @@ CZipPackFile::CZipPackFile( CBaseFileSystem* fs, void *pSection )
 
 CZipPackFile::~CZipPackFile()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_nRustPakIndex )
+		source_rust_bridge_pak_index_destroy( m_nRustPakIndex );
+#endif
 	DiscardPreloadData();
 }
 
@@ -826,14 +995,17 @@ CZipPackFile::~CZipPackFile()
 //			src2 -
 // Output : Returns true on success, false on failure.
 //-----------------------------------------------------------------------------
+#if !defined( SOURCE_RUST_ENGINE )
 bool CZipPackFile::CPackFileLessFunc::Less( CZipPackFile::CPackFileEntry const& src1, CZipPackFile::CPackFileEntry const& src2, void *pCtx )
 {
 	return ( src1.m_HashName < src2.m_HashName );
 }
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: Zip Pack file handle implementation
 //-----------------------------------------------------------------------------
+#if !defined( SOURCE_RUST_ENGINE )
 CZipPackFileHandle::CZipPackFileHandle( CZipPackFile* pOwner, int64 nBase, unsigned int nLength, unsigned int nIndex, unsigned int nFilePointer )
 {
 	m_pOwner = pOwner;
@@ -1125,3 +1297,4 @@ void CLZMAZipPackFileHandle::Reset()
 	m_ReadBuffer.SeekGet( CUtlBuffer::SEEK_HEAD, 0 );
 	m_ReadBuffer.SeekPut( CUtlBuffer::SEEK_HEAD, 0 );
 }
+#endif

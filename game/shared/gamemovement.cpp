@@ -2405,7 +2405,10 @@ bool CGameMovement::CheckJumpButton( void )
 	if (player->GetGroundEntity() == NULL)
 	{
 		// Trainer multi-jump: allow extra jumps while airborne once the jump key has been released.
-		int nExtraJumps = trainer_multijump.GetInt();
+		int nExtraJumps = 0;
+#if defined( HL2_DLL ) || defined( HL2_CLIENT_DLL )
+		nExtraJumps = trainer_multijump.GetInt();
+#endif
 		if ( nExtraJumps != 0 && !( mv->m_nOldButtons & IN_JUMP ) &&
 			 ( nExtraJumps < 0 || player->m_Local.m_nTrainerAirJumps < nExtraJumps ) )
 		{
@@ -4952,4 +4955,3 @@ void  CGameMovement::TryTouchGround( const Vector& start, const Vector& end, con
 	ray.Init( start, end, mins, maxs );
 	UTIL_TraceRay( ray, fMask, mv->m_nPlayerHandle.Get(), collisionGroup, &pm );
 }
-

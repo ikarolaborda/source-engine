@@ -66,7 +66,21 @@ static void AddSeperatorAndFixPath( char *str );
 // Case-insensitive symbol table for path IDs.
 CUtlSymbolTableMT g_PathIDTable( 0, 32, true );
 
+#if defined( SOURCE_RUST_ENGINE )
+static void CheckRustMountStatus( SourceAbiStatus status )
+{
+	if ( status != SOURCE_ABI_OK ) ::Error( "Rust mount table operation failed (status %d)\n", status );
+}
+static int NextSearchPathID()
+{
+	int32_t id = 0;
+	CheckRustMountStatus( source_rust_bridge_mount_store_id_next( &id ) );
+	return id;
+}
+#else
 int g_iNextSearchPathID = 1;
+static int NextSearchPathID() { return g_iNextSearchPathID++; }
+#endif
 
 // This can be used to easily fix a filename on the stack.
 #ifdef	DBGFLAG_ASSERT
@@ -555,6 +569,20 @@ inline void CBaseFileSystem::ComputeFullWritePath( char* pDest, int maxlen, cons
 }
 
 #if defined( SOURCE_RUST_ENGINE )
+bool CBaseFileSystem::FilterByPathID( const CSearchPath *pSearchPath, const CUtlSymbol &pathID )
+{
+	if ( !pSearchPath || !pSearchPath->m_pPathIDInfo ) return true;
+	const char *stored = pSearchPath->GetPathIDString();
+	const bool hasRequested = (UtlSymId_t)pathID != UTL_INVAL_SYMBOL;
+	const char *requested = hasRequested ? g_PathIDTable.String( pathID ) : NULL;
+	uint32_t matches = 0;
+	const SourceAbiStatus status = source_rust_bridge_read_path_matches(
+		stored, Q_strlen( stored ), requested, requested ? Q_strlen( requested ) : 0,
+		hasRequested, pSearchPath->m_pPathIDInfo->m_bByRequestOnly,
+		pSearchPath->GetPackFile() && pSearchPath->IsMapPath(), &matches );
+	return status != SOURCE_ABI_OK || matches == 0;
+}
+
 void CBaseFileSystem::SyncRustReadPaths()
 {
 	m_bRustReadPathsSynchronized.store( false, std::memory_order_release );
@@ -563,7 +591,7 @@ void CBaseFileSystem::SyncRustReadPaths()
 
 	uint32_t directoryCount = 0;
 	uint32_t vpkCount = 0;
-	uint32_t legacyPackCount = 0;
+	uint32_t pakCount = 0;
 	for ( int i = 0; i < m_SearchPaths.Count(); ++i )
 	{
 		const CSearchPath &searchPath = m_SearchPaths[i];
@@ -575,10 +603,12 @@ void CBaseFileSystem::SyncRustReadPaths()
 		SourceAbiStatus status = SOURCE_ABI_OK;
 		if ( searchPath.GetPackFile() )
 		{
-			++legacyPackCount;
-			continue;
+			CPackFile *pack = searchPath.GetPackFile();
+			status = source_rust_bridge_read_path_add_pak_index( pack->GetRustPackIndex(),
+				pathID, Q_strlen( pathID ), false, byRequestOnly );
+			++pakCount;
 		}
-		if ( searchPath.GetPackedStore() )
+		else if ( searchPath.GetPackedStore() )
 		{
 			CPackedStoreRefCount *packedStore = searchPath.GetPackedStore();
 			char vpkPath[MAX_FILEPATH];
@@ -603,13 +633,16 @@ void CBaseFileSystem::SyncRustReadPaths()
 		}
 		if ( status != SOURCE_ABI_OK )
 		{
-			const char *failedPath = searchPath.GetPackedStore()
+			const char *failedPath = searchPath.GetPackFile() ? searchPath.GetPackFile()->m_ZipName.String() : searchPath.GetPackedStore()
 				? searchPath.GetPackedStore()->FullPathName()
 				: searchPath.GetPathString();
 			Warning( FILESYSTEM_WARNING,
 				"Rust filesystem read path synchronization failed for %s (%s, status %d)\n",
 				failedPath ? failedPath : "<unknown>", pathID, status );
 			source_rust_bridge_read_paths_clear();
+			if ( searchPath.GetPackFile() )
+				::Error( "Rust filesystem ZIP/BSP mount rejected: %s (%s, status %d)\n",
+					failedPath, pathID, status );
 			return;
 		}
 	}
@@ -620,16 +653,15 @@ void CBaseFileSystem::SyncRustReadPaths()
 		static std::atomic<bool> s_ReportedRustReadSync( false );
 		if ( !s_ReportedRustReadSync.exchange( true, std::memory_order_relaxed ) )
 		{
-			Msg( "Rust filesystem read paths synchronized: %u directories, %u VPKs, %u legacy packs guarded\n",
-				directoryCount, vpkCount, legacyPackCount );
+			Msg( "Rust filesystem read paths synchronized: %u directories, %u VPKs, %u ZIP/BSP packs\n",
+				directoryCount, vpkCount, pakCount );
 		}
 	}
-	if ( legacyPackCount != 0 )
+	if ( pakCount != 0 )
 	{
-		static std::atomic<bool> s_ReportedRustLegacyPackGuard( false );
-		if ( !s_ReportedRustLegacyPackGuard.exchange( true, std::memory_order_relaxed ) )
-			Msg( "Rust filesystem legacy pack precedence guard synchronized: %u packs\n",
-				legacyPackCount );
+		static std::atomic<bool> s_ReportedRustPakMount( false );
+		if ( !s_ReportedRustPakMount.exchange( true, std::memory_order_relaxed ) )
+			Msg( "Rust filesystem ZIP/BSP mounts active: %u packs\n", pakCount );
 	}
 }
 
@@ -653,20 +685,6 @@ void CBaseFileSystem::SyncRustWritePaths()
 	}
 }
 
-bool CBaseFileSystem::LegacyPackContainsFile( const char *pFileName, const char *pPathID )
-{
-	const char *iteratedFileName = pFileName;
-	CSearchPathsIterator iterator( this, &iteratedFileName, pPathID, FILTER_CULLNONPACK );
-	for ( CSearchPath *searchPath = iterator.GetFirst(); searchPath;
-		searchPath = iterator.GetNext() )
-	{
-		CPackFile *pack = searchPath->GetPackFile();
-		if ( pack && pack->ContainsFile( iteratedFileName ) )
-			return true;
-	}
-	return false;
-}
-
 bool CBaseFileSystem::TryRustReadFileSize( const char *pFileName, const char *pPathID,
 	uint64_t *pSize )
 {
@@ -679,8 +697,7 @@ bool CBaseFileSystem::TryRustReadFileSize( const char *pFileName, const char *pP
 
 	char tempPathID[MAX_PATH];
 	ParsePathID( pFileName, pPathID, tempPathID );
-	if ( !pFileName[0] || Q_IsAbsolutePath( pFileName ) ||
-		LegacyPackContainsFile( pFileName, pPathID ) )
+	if ( !pFileName[0] || Q_IsAbsolutePath( pFileName ) )
 	{
 		return false;
 	}
@@ -712,8 +729,7 @@ bool CBaseFileSystem::TryRustResolveReadPath( const char *pFileName, const char 
 	if ( !pFileName || !pFileName[0] || !pDest || maxLenInChars <= 0 ||
 		!m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) ||
 		m_WhitelistFileTrackingEnabled != 0 ||
-		Q_IsAbsolutePath( pFileName ) ||
-		LegacyPackContainsFile( pFileName, pPathID ) )
+		Q_IsAbsolutePath( pFileName ) )
 	{
 		return false;
 	}
@@ -1079,7 +1095,7 @@ void CBaseFileSystem::AddVPKFile( char const *pPath, const char *pPathID, Search
 	// Crete a search path for this
 	CSearchPath *sp = &m_SearchPaths[ ( addType == PATH_ADD_TO_TAIL ) ? m_SearchPaths.AddToTail() : m_SearchPaths.AddToHead() ];
 	sp->SetPackedStore( pVPK );
-	sp->m_storeId = g_iNextSearchPathID++;
+	sp->m_storeId = NextSearchPathID();
 	sp->SetPath( pathIDSym );
 	sp->m_pPathIDInfo = FindOrAddPathIDInfo( g_PathIDTable.AddString( pPathID ), -1 );
 
@@ -1146,11 +1162,21 @@ bool CBaseFileSystem::AddPackFileFromPath( const char *pPath, const char *pakfil
 	_snprintf( fullpath, sizeof(fullpath), "%s%s", pPath, pakfile );
 	Q_FixSlashes( fullpath );
 
+#if !defined( SOURCE_RUST_ENGINE )
 	struct	_stat buf;
 	if ( FS_stat( fullpath, &buf ) == -1 )
 		return false;
+#endif
 
 	CPackFile *pf = new CZipPackFile( this );
+	pf->m_ZipName = fullpath;
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !pf->Prepare() )
+	{
+		delete pf;
+		return false;
+	}
+#else
 	pf->m_hPackFileHandleFS = Trace_FOpen( fullpath, "rb", 0, NULL );
 	if ( !pf->m_hPackFileHandleFS )
 	{
@@ -1174,15 +1200,21 @@ bool CBaseFileSystem::AddPackFileFromPath( const char *pPath, const char *pakfil
 
 		return false;
 	}
+#endif
 
 	// Add this pack file to the search path:
+#if !defined( SOURCE_RUST_ENGINE )
+	// Use the stat already taken above: GetFileTime would iterate search paths
+	// while the new entry's path-ID metadata is still being initialized.
+	pf->m_lPackFileTime = buf.st_mtime;
+#endif
 	CSearchPath *sp = &m_SearchPaths[ m_SearchPaths.AddToTail() ];
-	pf->SetPath( sp->GetPath() );
-	pf->m_lPackFileTime = GetFileTime( pakfile );
-
 	sp->SetPath( pPath );
-	sp->m_pPathIDInfo->SetPathID( pathID );
+	pf->SetPath( sp->GetPath() );
+	sp->m_pPathIDInfo = FindOrAddPathIDInfo( g_PathIDTable.AddString( pathID ), -1 );
+	sp->m_storeId = NextSearchPathID();
 	sp->SetPackFile( pf );
+	m_ZipFiles.AddToTail( pf );
 
 	return true;
 }
@@ -1204,6 +1236,39 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 	DISK_INTENSIVE();
 
 	CUtlVector< CUtlString > pakNames;
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust snapshots full candidate paths in precedence order. Collect before
+	// changing native mount state, and never truncate a path into another name.
+	uint32_t naming = 0;
+	const char *language = "";
+#if defined( _X360 )
+	naming = 1;
+	if ( XBX_IsLocalized() && !XboxLaunch()->GetForceEnglish() &&
+		 ( V_stricmp( g_PathIDTable.String( pathID ), "game" ) == 0 ||
+		   V_stricmp( g_PathIDTable.String( pathID ), "mod" ) == 0 ) )
+		language = XBX_GetLanguageString();
+#endif
+	SourceAbiSlice root = { reinterpret_cast<const uint8_t *>( pPath ), static_cast<uint64_t>( Q_strlen( pPath ) ) };
+	SourceAbiSlice locale = { reinterpret_cast<const uint8_t *>( language ), static_cast<uint64_t>( Q_strlen( language ) ) };
+	char candidate[4097];
+	SourceAbiMutSlice output = { reinterpret_cast<uint8_t *>( candidate ), sizeof( candidate ) - 1 };
+	uint64_t written = 0, find = 0;
+	uint32_t isDirectory = 0;
+	SourceAbiStatus status = source_rust_bridge_find_pack_candidates(
+		root, naming, locale, output, &written, &isDirectory, &find );
+	while ( status == SOURCE_ABI_OK )
+	{
+		candidate[written] = '\0';
+		pakNames.AddToTail( candidate );
+		status = source_rust_bridge_find_next( find, candidate, sizeof( candidate ) - 1, &written, &isDirectory );
+	}
+	if ( find ) source_rust_bridge_find_close( find );
+	if ( status != SOURCE_ABI_NOT_FOUND )
+	{
+		::Warning( "Rust pack discovery rejected: %s (status %u)\n", pPath, status );
+		return;
+	}
+#else
 	CUtlVector< int64 > pakSizes;
 
 	// determine pak files, [zip0..zipN]
@@ -1250,14 +1315,21 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 	}
 #endif
 
-	// Add any zip files in the format zip1.zip ... zip0.zip
-	// Add them backwards so zip(N) is higher priority than zip(N-1), etc.
-	int pakcount = pakSizes.Count();
+#endif // SOURCE_RUST_ENGINE
+
+	// Rust already supplies precedence order; the legacy path reverses its scan.
+	int pakcount = pakNames.Count();
 	int nCount = 0;
+#if defined( SOURCE_RUST_ENGINE )
+	for ( int i = 0; i < pakcount; ++i )
+	{
+		const char *fullpath = pakNames[i].Get();
+#else
 	for ( int i = pakcount-1; i >= 0; i-- )
 	{
 		char fullpath[MAX_PATH];
 		V_ComposeFileName( pPath, pakNames[i].Get(), fullpath, sizeof( fullpath ) );
+#endif
 
 		int nIndex;
 		if ( addType == PATH_ADD_TO_TAIL )
@@ -1273,7 +1345,7 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 		CSearchPath *sp = &m_SearchPaths[ nIndex ];
 		
 		sp->m_pPathIDInfo = FindOrAddPathIDInfo( pathID, -1 );
-		sp->m_storeId = g_iNextSearchPathID++;
+		sp->m_storeId = NextSearchPathID();
 		sp->SetPath( g_PathIDTable.AddString( pPath ) );
 
 		CPackFile *pf = NULL;
@@ -1298,6 +1370,13 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 
 			m_ZipFiles.AddToTail( pf );
 			sp->SetPackFile( pf );
+#if defined( SOURCE_RUST_ENGINE )
+			if ( !pf->Prepare() )
+			{
+				m_SearchPaths.Remove( nIndex );
+				if ( addType != PATH_ADD_TO_TAIL ) --nCount;
+			}
+#else
 			pf->m_lPackFileTime = GetFileTime( fullpath );
 
 			pf->m_hPackFileHandleFS = Trace_FOpen( fullpath, "rb", 0, NULL );
@@ -1308,7 +1387,8 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 
 				if ( pf->Prepare( pakSizes[i] ) )
 				{
-					FS_setbufsize( pf->m_hPackFileHandleFS, filesystem_buffer_size.GetInt() );
+					if ( pf->m_hPackFileHandleFS )
+						FS_setbufsize( pf->m_hPackFileHandleFS, filesystem_buffer_size.GetInt() );
 				}
 				else
 				{
@@ -1330,6 +1410,7 @@ void CBaseFileSystem::AddPackFiles( const char *pPath, const CUtlSymbol &pathID,
 					m_SearchPaths.Remove( nIndex );
 				} 
 			}
+#endif
 		}
 	}
 }
@@ -1431,6 +1512,12 @@ void CBaseFileSystem::AddMapPackFile( const char *pPath, const char *pPathID, Se
 	}
 
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		CPackFile *pf = new CZipPackFile( this );
+		pf->m_bIsMapPath = true;
+		pf->m_ZipName = fullpath;
+		if ( pf->Prepare() )
+#else
 		FILE *fp = Trace_FOpen( fullpath, "rb", 0, NULL );
 		if ( !fp )
 		{
@@ -1472,6 +1559,7 @@ void CBaseFileSystem::AddMapPackFile( const char *pPath, const char *pPathID, Se
 		pf->m_ZipName = fullpath;
 	
 		if ( pf->Prepare( packfile->filelen, packfile->fileofs ) )
+#endif
 		{
 			int nIndex;
 			if ( addType == PATH_ADD_TO_TAIL )
@@ -1496,9 +1584,12 @@ void CBaseFileSystem::AddMapPackFile( const char *pPath, const char *pPathID, Se
 			}
 	
 			pf->SetPath( pathSymbol );
+#if !defined( SOURCE_RUST_ENGINE )
 			pf->m_lPackFileTime = GetFileTime( newPath );
+#endif
 	
-			Trace_FClose( pf->m_hPackFileHandleFS );
+			if ( pf->m_hPackFileHandleFS )
+				Trace_FClose( pf->m_hPackFileHandleFS );
 			pf->m_hPackFileHandleFS = NULL;
 
 			m_ZipFiles.AddToTail( pf );
@@ -1528,6 +1619,7 @@ void CBaseFileSystem::BeginMapAccess()
 				pPackFile->AddRef();
 				pPackFile->m_mutex.Lock();
 
+#if !defined( SOURCE_RUST_ENGINE )
 #if defined( SUPPORT_PACKED_STORE )
 				if ( pPackFile->m_nOpenFiles == 0 && pPackFile->m_hPackFileHandleFS == NULL && !pPackFile->m_hPackFileHandleVPK )
 #else
@@ -1545,6 +1637,7 @@ void CBaseFileSystem::BeginMapAccess()
 //					}
 //#endif
 				}
+#endif
 				pPackFile->m_nOpenFiles++;
 				pPackFile->m_mutex.Unlock();
 			}
@@ -1689,6 +1782,8 @@ void CBaseFileSystem::AddSearchPathInternal( const char *pPath, const char *path
 	for ( i = 0; i < c; i++ )
 	{
 		CSearchPath *pSearchPath = &m_SearchPaths[i];
+		CUtlSymbol candidatePath = pSearchPath->GetPath();
+		int candidateStore = pSearchPath->m_storeId;
 		if ( pSearchPath->GetPath() == pathSym && pSearchPath->GetPathID() == pathIDSym )
 		{
 			if ( ( addType == PATH_ADD_TO_HEAD && i == 0 ) || ( addType == PATH_ADD_TO_TAIL ) )
@@ -1698,20 +1793,27 @@ void CBaseFileSystem::AddSearchPathInternal( const char *pPath, const char *path
 			else
 			{
 				m_SearchPaths.Remove(i); // remove it from its current position so we can add it back to the head
+				// The old vector shifted the next entry into this address. Preserve
+				// that candidate policy without dereferencing a released resource.
+				if ( i < m_SearchPaths.Count() )
+				{
+					candidatePath = m_SearchPaths[i].GetPath();
+					candidateStore = m_SearchPaths[i].m_storeId;
+				}
 				i--;
 				c--;
 			}
 		}
-		if ( !id && pSearchPath->GetPath() == pathSym )
+		if ( !id && candidatePath == pathSym )
 		{
 			// get first found - all reference the same store
-			id = pSearchPath->m_storeId;
+			id = candidateStore;
 		}
 	}
 
 	if (!id)
 	{
-		id = g_iNextSearchPathID++;
+		id = NextSearchPathID();
 	}
 
 	if ( IsX360() && bAddPackFiles && ( !Q_stricmp( pathID, "DEFAULT_WRITE_PATH" ) || !Q_stricmp( pathID, "LOGDIR" ) ) )
@@ -1773,7 +1875,7 @@ void CBaseFileSystem::AddSearchPathInternal( const char *pPath, const char *path
 //-----------------------------------------------------------------------------
 CBaseFileSystem::CSearchPath *CBaseFileSystem::FindSearchPathByStoreId( int storeId )
 {
-	FOR_EACH_VEC( m_SearchPaths, i )
+	for ( int i = 0; i < m_SearchPaths.Count(); ++i )
 	{
 		if ( m_SearchPaths[i].m_storeId == storeId )
 			return &m_SearchPaths[i];
@@ -2697,12 +2799,13 @@ FileHandle_t CBaseFileSystem::OpenForRead( const char *pFileNameT, const char *p
 
 #if defined( SOURCE_RUST_ENGINE )
 	// Serve ordinary relative content through the synchronized ordered
-	// loose/VPK mounts. Legacy ZIP/BSP packs retain an explicit precedence
-	// guard until their archive format is owned by Rust too.
+	// loose/VPK/ZIP/BSP mounts. Rust owns archive payloads and precedence.
+	// BSP text opens previously used the pack adapter's CRLF-aware ReadLine.
+	// Keep that adapter until the ordinary Rust handle carries text mode too.
 	if ( m_bRustReadPathsSynchronized.load( std::memory_order_acquire ) &&
 		!V_IsAbsolutePath( pFileName ) && !( flags & FSOPEN_NEVERINPACK ) &&
-		m_WhitelistFileTrackingEnabled == 0 &&
-		!LegacyPackContainsFile( pFileName, pathID ) )
+		( !pathID || Q_stricmp( pathID, "BSP" ) != 0 || strchr( pOptions, 'b' ) ) &&
+		m_WhitelistFileTrackingEnabled == 0 )
 	{
 		uint64_t rustFile = 0;
 		uint64_t rustFileBytes = 0;
@@ -2731,6 +2834,19 @@ FileHandle_t CBaseFileSystem::OpenForRead( const char *pFileNameT, const char *p
 			}
 
 			static std::atomic<bool> s_ReportedRustRead( false );
+			static std::atomic<bool> s_ReportedRustPakRead( false );
+			if ( !s_ReportedRustPakRead.load( std::memory_order_relaxed ) )
+			{
+				char resolved[MAX_FILEPATH];
+				uint64_t written = 0;
+				uint32_t kind = SOURCE_READ_PATH_DISK;
+				if ( source_rust_bridge_resolve_read_path( pFileName, Q_strlen( pFileName ),
+					pathID, pathIDLength, resolved, sizeof( resolved ), &written, &kind ) == SOURCE_ABI_OK &&
+					kind == SOURCE_READ_PATH_PAK &&
+					!s_ReportedRustPakRead.exchange( true, std::memory_order_relaxed ) )
+					Msg( "Rust filesystem ZIP/BSP read active: %s (%llu bytes)\n", pFileName,
+						static_cast<unsigned long long>( rustFileBytes ) );
+			}
 			if ( !s_ReportedRustRead.exchange( true, std::memory_order_relaxed ) )
 			{
 				Msg( "Rust filesystem read active: %s (%llu bytes)\n", pFileName,
@@ -2741,6 +2857,14 @@ FileHandle_t CBaseFileSystem::OpenForRead( const char *pFileNameT, const char *p
 		}
 		if ( rustStatus == SOURCE_ABI_OK && rustFile != 0 )
 			source_rust_bridge_file_close( rustFile );
+		// A recognized but corrupt archive entry must not bypass Rust's
+		// validation via native IO, or fall through to a lower-priority mount.
+		if ( rustStatus == SOURCE_ABI_FORMAT_ERROR || rustStatus == SOURCE_ABI_IO_ERROR ||
+			rustStatus == SOURCE_ABI_OK )
+		{
+			Warning( FILESYSTEM_WARNING, "Rust filesystem rejected read: %s (status %d)\n", pFileName, rustStatus );
+			return NULL;
+		}
 	}
 #endif
 
@@ -3966,7 +4090,7 @@ void CBaseFileSystem::RegisterFileWhitelist( IPureServerWhitelist *pWhiteList, I
 	}
 
 	// update which search paths are considered trusted
-	FOR_EACH_VEC( m_SearchPaths, i )
+	for ( int i = 0; i < m_SearchPaths.Count(); ++i )
 	{
 		SetSearchPathIsTrustedSource( &m_SearchPaths[i] );
 	}
@@ -4452,9 +4576,14 @@ const char *CBaseFileSystem::FindFirstHelper( const char *pWildCardT, const char
 		uint64_t rustNameLength = 0;
 		uint32_t rustIsDirectory = 0;
 		const uint64_t pathIDLength = pPathID ? Q_strlen( pPathID ) : 0;
+		// POSIX FindData uses PATH_MAX, but the legacy pack adapter exposes
+		// only MAX_PATH-sized basenames. Preserve its BSP query limit.
+		const uint64_t rustNameCapacity = pPathID && !Q_stricmp( pPathID, "BSP" )
+			? MIN( sizeof( pFindData->findData.cFileName ) - 1, MAX_PATH - 1 )
+			: sizeof( pFindData->findData.cFileName ) - 1;
 		const SourceAbiStatus rustStatus = source_rust_bridge_find_first(
 			pWildCard, Q_strlen( pWildCard ), pPathID, pathIDLength,
-			pFindData->findData.cFileName, sizeof( pFindData->findData.cFileName ) - 1,
+			pFindData->findData.cFileName, rustNameCapacity,
 			&rustNameLength, &rustIsDirectory, &rustFind );
 		if ( rustStatus == SOURCE_ABI_OK && rustFind != 0 &&
 			rustNameLength < sizeof( pFindData->findData.cFileName ) )
@@ -4681,7 +4810,7 @@ bool CBaseFileSystem::FindNextFileInVPKOrPakHelper( FindData_t *pFindData )
 	{
 		V_strncpy( pFindData->findData.cFileName, V_UnqualifiedFileName( pFindData->m_dirMatchesFromVPKOrPak[0] ), sizeof( pFindData->findData.cFileName ) );
 		pFindData->findData.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-		delete pFindData->m_dirMatchesFromVPKOrPak.Head();
+		delete[] pFindData->m_dirMatchesFromVPKOrPak.Head();
 		pFindData->m_dirMatchesFromVPKOrPak.RemoveMultipleFromHead( 1 );
 
 		return true;
@@ -5480,8 +5609,33 @@ CBaseFileSystem::CSearchPath *CBaseFileSystem::CSearchPathsIterator::GetFirst()
 {
 	if ( m_SearchPaths.Count() )
 	{
+#if defined( SOURCE_RUST_ENGINE )
+		if ( m_RustSearchPlan ) source_rust_bridge_search_state_destroy( m_RustSearchPlan );
+		m_RustSearchPlan = 0;
+		CUtlVector<SourceAbiSearchPath> paths;
+		paths.SetCount( m_SearchPaths.Count() );
+		for ( int i = 0; i < m_SearchPaths.Count(); ++i )
+		{
+			const CSearchPath &path = m_SearchPaths[i];
+			const char *id = path.GetPathIDString();
+			paths[i].path_id.data = reinterpret_cast<const uint8_t *>( id );
+			paths[i].path_id.length = Q_strlen( id );
+			paths[i].store_id = path.m_storeId;
+			paths[i].flags = ( path.GetPackFile() ? SOURCE_SEARCH_PACK : 0 ) |
+				( path.GetPackFile() && path.IsMapPath() ? SOURCE_SEARCH_MAP : 0 ) |
+				( path.m_pPathIDInfo->m_bByRequestOnly ? SOURCE_SEARCH_BY_REQUEST : 0 ) |
+				( IsPlatformExcluded( &path ) ? SOURCE_SEARCH_EXCLUDED : 0 );
+		}
+		const bool hasRequested = (UtlSymId_t)m_pathID != UTL_INVAL_SYMBOL;
+		const char *id = hasRequested ? g_PathIDTable.String( m_pathID ) : NULL;
+		SourceAbiSlice requested = { reinterpret_cast<const uint8_t *>( id ), id ? static_cast<uint64_t>( Q_strlen( id ) ) : 0 };
+		if ( source_rust_bridge_search_plan_create( paths.Base(), paths.Count(), requested,
+			hasRequested ? 1 : 0, m_PathTypeFilter, &m_RustSearchPlan ) != SOURCE_ABI_OK )
+			return NULL;
+#else
 		m_visits.Reset();
 		m_iCurrent = -1;
+#endif
 		return GetNext();
 	}
 	return &m_EmptySearchPath;
@@ -5493,6 +5647,13 @@ CBaseFileSystem::CSearchPath *CBaseFileSystem::CSearchPathsIterator::GetFirst()
 //-----------------------------------------------------------------------------
 CBaseFileSystem::CSearchPath *CBaseFileSystem::CSearchPathsIterator::GetNext()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !m_RustSearchPlan ) return m_SearchPaths.Count() ? GetFirst() : NULL;
+	uint32_t index = UINT32_MAX;
+	if ( source_rust_bridge_search_plan_next( m_RustSearchPlan, &index ) != SOURCE_ABI_OK ||
+		index >= static_cast<uint32_t>( m_SearchPaths.Count() ) ) return NULL;
+	return &m_SearchPaths[index];
+#else
 	CSearchPath *pSearchPath = NULL;
 
 	for ( m_iCurrent++; m_iCurrent < m_SearchPaths.Count(); m_iCurrent++ )
@@ -5508,36 +5669,7 @@ CBaseFileSystem::CSearchPath *CBaseFileSystem::CSearchPathsIterator::GetNext()
 		if ( CBaseFileSystem::FilterByPathID( pSearchPath, m_pathID ) )
 			continue;
 
-		// 360 can optionally ignore a local search path in dvddev mode
-		// ignoring a local search path falls through to its cloned remote path
-		// map paths are exempt from this exclusion logic
-		if ( IsX360() && ( m_DVDMode == DVDMODE_DEV ) && m_Filename[0] && !pSearchPath->m_bIsRemotePath )
-		{
-			bool bIsMapPath = pSearchPath->GetPackFile() && pSearchPath->GetPackFile()->m_bIsMapPath;
-			if ( !bIsMapPath )
-			{
-				bool bIgnorePath = false;
-				char szExcludePath[MAX_PATH];
-				char szFilename[MAX_PATH];
-				V_ComposeFileName( pSearchPath->GetPathString(), m_Filename, szFilename, sizeof( szFilename ) );
-				for ( int i = 0; i < m_ExcludePaths.Count(); i++ )
-				{
-					if ( g_pFullFileSystem->String( m_ExcludePaths[i], szExcludePath, sizeof( szExcludePath ) ) )
-					{
-						if ( !V_strnicmp( szFilename, szExcludePath, strlen( szExcludePath ) ) )
-						{
-							bIgnorePath = true;
-							break;
-						}
-					}
-				}
-				if ( bIgnorePath )
-				{
-					// filename matches exclusion path, skip it
-					continue;
-				}
-			}
-		}
+		if ( IsPlatformExcluded( pSearchPath ) ) continue;
 
 		if ( !m_visits.MarkVisit( *pSearchPath ) )
 			break;
@@ -5549,10 +5681,52 @@ CBaseFileSystem::CSearchPath *CBaseFileSystem::CSearchPathsIterator::GetNext()
 	}
 
 	return NULL;
+#endif
 }
 
-void CBaseFileSystem::CSearchPathsIterator::CopySearchPaths( const CUtlVector<CSearchPath>	&searchPaths )
+bool CBaseFileSystem::CSearchPathsIterator::IsPlatformExcluded( const CSearchPath *path ) const
 {
+	// Native Xbox path-name/exclusion lookup remains a platform input. Rust
+	// applies it before duplicate-store suppression, so a remote alias can win.
+	if ( !IsX360() || m_DVDMode != DVDMODE_DEV || !m_Filename[0] || path->m_bIsRemotePath ||
+		( path->GetPackFile() && path->IsMapPath() ) ) return false;
+	char excluded[MAX_PATH], filename[MAX_PATH];
+	V_ComposeFileName( path->GetPathString(), m_Filename, filename, sizeof( filename ) );
+	for ( int i = 0; i < m_ExcludePaths.Count(); ++i )
+	{
+		if ( g_pFullFileSystem->String( m_ExcludePaths[i], excluded, sizeof( excluded ) ) &&
+			!V_strnicmp( filename, excluded, strlen( excluded ) ) ) return true;
+	}
+	return false;
+}
+
+#if defined( SOURCE_RUST_ENGINE )
+CBaseFileSystem::CSearchPathsIterator::~CSearchPathsIterator()
+{
+	if ( m_RustSearchPlan ) source_rust_bridge_search_state_destroy( m_RustSearchPlan );
+}
+
+CBaseFileSystem::CSearchPathsVisits::~CSearchPathsVisits()
+{
+	if ( m_RustVisits ) source_rust_bridge_search_state_destroy( m_RustVisits );
+}
+void CBaseFileSystem::CSearchPathsVisits::Reset()
+{
+	if ( m_RustVisits ) source_rust_bridge_search_state_reset( m_RustVisits );
+}
+bool CBaseFileSystem::CSearchPathsVisits::MarkVisit( const CSearchPath &path )
+{
+	if ( !m_RustVisits && source_rust_bridge_search_visits_create( &m_RustVisits ) != SOURCE_ABI_OK ) return true;
+	uint32_t seen = 1;
+	return source_rust_bridge_search_visits_mark( m_RustVisits, path.m_storeId, &seen ) != SOURCE_ABI_OK || seen != 0;
+}
+#endif
+
+void CBaseFileSystem::CSearchPathsIterator::CopySearchPaths( const CSearchPathTable &searchPaths )
+{
+#if defined( SOURCE_RUST_ENGINE )
+	m_SearchPaths.CopyFrom( searchPaths );
+#else
 	m_SearchPaths = searchPaths;
 	for ( int i = 0; i <  m_SearchPaths.Count(); i++ )
 	{
@@ -5565,7 +5739,75 @@ void CBaseFileSystem::CSearchPathsIterator::CopySearchPaths( const CUtlVector<CS
 			m_SearchPaths[i].GetPackedStore()->AddRef();
 		}
 	}
+#endif
 }
+
+#if defined( SOURCE_RUST_ENGINE )
+void CBaseFileSystem::CSearchPathTable::DropPath( void *path )
+{ delete static_cast<CSearchPath *>( path ); }
+
+void *CBaseFileSystem::CSearchPathTable::ClonePath( const void *path )
+{
+	CSearchPath *copy = new CSearchPath( *static_cast<const CSearchPath *>( path ) );
+	if ( copy->GetPackFile() ) copy->GetPackFile()->AddRef();
+	else if ( copy->GetPackedStore() ) copy->GetPackedStore()->AddRef();
+	return copy;
+}
+
+void CBaseFileSystem::CSearchPathTable::Ensure()
+{
+	if ( !m_Registry ) CheckRustMountStatus( source_rust_bridge_mount_table_create( DropPath, ClonePath, &m_Registry ) );
+}
+
+CBaseFileSystem::CSearchPathTable::~CSearchPathTable()
+{
+	if ( m_Registry ) CheckRustMountStatus( source_rust_bridge_mount_table_destroy( m_Registry ) );
+}
+
+int CBaseFileSystem::CSearchPathTable::Count() const
+{
+	if ( !m_Registry ) return 0;
+	uint32_t count = 0;
+	CheckRustMountStatus( source_rust_bridge_mount_table_count( m_Registry, &count ) );
+	return static_cast<int>( count );
+}
+
+const CBaseFileSystem::CSearchPath &CBaseFileSystem::CSearchPathTable::operator[]( int index ) const
+{
+	void *path = NULL;
+	CheckRustMountStatus( source_rust_bridge_mount_table_get( m_Registry, index, &path ) );
+	return *static_cast<const CSearchPath *>( path );
+}
+CBaseFileSystem::CSearchPath &CBaseFileSystem::CSearchPathTable::operator[]( int index )
+{ return const_cast<CSearchPath &>( static_cast<const CSearchPathTable &>( *this )[index] ); }
+
+int CBaseFileSystem::CSearchPathTable::InsertBefore( int index )
+{
+	Ensure();
+	CSearchPath *path = new CSearchPath;
+	const SourceAbiStatus status = source_rust_bridge_mount_table_insert( m_Registry, index, path );
+	if ( status != SOURCE_ABI_OK ) delete path; // Failure did not transfer ownership.
+	CheckRustMountStatus( status );
+	return index;
+}
+void CBaseFileSystem::CSearchPathTable::Remove( int index )
+{ CheckRustMountStatus( source_rust_bridge_mount_table_remove( m_Registry, index, 0 ) ); }
+void CBaseFileSystem::CSearchPathTable::FastRemove( int index )
+{ CheckRustMountStatus( source_rust_bridge_mount_table_remove( m_Registry, index, 1 ) ); }
+void CBaseFileSystem::CSearchPathTable::Purge()
+{
+	if ( m_Registry ) CheckRustMountStatus( source_rust_bridge_mount_table_clear( m_Registry ) );
+}
+void CBaseFileSystem::CSearchPathTable::CopyFrom( const CSearchPathTable &source )
+{
+	if ( !source.m_Registry ) { Purge(); return; }
+	uint64_t copy = 0;
+	CheckRustMountStatus( source_rust_bridge_mount_table_snapshot( source.m_Registry, &copy ) );
+	const uint64_t old = m_Registry;
+	m_Registry = copy;
+	if ( old ) CheckRustMountStatus( source_rust_bridge_mount_table_destroy( old ) );
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: Load/unload a DLL

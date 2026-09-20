@@ -9,8 +9,13 @@ use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+mod app_system;
+mod compression;
 mod d3d9;
+mod mount_table;
+mod pak_index;
 mod presenter;
+mod search_plan;
 pub use presenter::*;
 
 pub const SOURCE_ABI_VERSION: u32 = 1;
@@ -618,6 +623,61 @@ fn search_error_status(error: &source_filesystem::ReadError) -> SourceAbiStatus 
     }
 }
 
+#[no_mangle]
+/// Pure path-ID selection shared by Rust mounts and native search iterators.
+/// No context is needed during early startup or cleanup. An explicit empty ID
+/// differs from an unspecified ID; flags must be 0/1. Absent requests must have
+/// zero length. Invalid input fails closed with a zero result.
+///
+/// # Safety
+/// Slices describe readable UTF-8 bytes; out_matches points to writable storage.
+pub unsafe extern "C" fn source_read_path_matches(
+    stored: SourceAbiSlice,
+    requested: SourceAbiSlice,
+    has_requested: u8,
+    by_request_only: u8,
+    is_map_pack: u8,
+    out_matches: *mut u32,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if out_matches.is_null() {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        unsafe { out_matches.write(0) };
+        if has_requested > 1
+            || by_request_only > 1
+            || is_map_pack > 1
+            || (has_requested == 0 && requested.length != 0)
+        {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        let stored = match unsafe { read_slice(stored) }
+            .and_then(|bytes| std::str::from_utf8(bytes).map_err(|_| SOURCE_ABI_INVALID_ARGUMENT))
+        {
+            Ok(stored) => stored,
+            Err(status) => return status,
+        };
+        let requested = if has_requested != 0 {
+            match unsafe { read_slice(requested) }.and_then(|bytes| {
+                std::str::from_utf8(bytes).map_err(|_| SOURCE_ABI_INVALID_ARGUMENT)
+            }) {
+                Ok(requested) => Some(requested),
+                Err(status) => return status,
+            }
+        } else {
+            None
+        };
+        let matches = source_filesystem::selection::path_id_matches(
+            stored,
+            requested,
+            by_request_only != 0,
+            is_map_pack != 0,
+        );
+        unsafe { out_matches.write(u32::from(matches)) };
+        SOURCE_ABI_OK
+    })
+}
+
 fn file_error_status(error: &source_filesystem::FileError) -> SourceAbiStatus {
     match error {
         source_filesystem::FileError::InvalidMode(_) => SOURCE_ABI_INVALID_ARGUMENT,
@@ -834,6 +894,77 @@ unsafe fn read_optional_utf8_slice<'a>(
 }
 
 #[no_mangle]
+/// Replaces startup GAME read mounts using the selected game's gameinfo.txt.
+/// The replacement is atomic: a malformed declaration leaves existing mounts
+/// intact. Native filesystem initialization later supplies its complete registry.
+///
+/// # Safety
+/// Input slices must contain readable UTF-8 for this call. `external_root` may
+/// be empty. `out_mount_count` must point to writable u64 storage.
+pub unsafe extern "C" fn source_context_mount_gameinfo(
+    handle: SourceAbiHandle,
+    base: SourceAbiSlice,
+    game: SourceAbiSlice,
+    external_root: SourceAbiSlice,
+    out_mount_count: *mut u64,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        if out_mount_count.is_null() {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        unsafe { *out_mount_count = 0 };
+        let context = match get_context(handle) {
+            Ok(context) => context,
+            Err(status) => return status,
+        };
+        let inputs = unsafe {
+            (
+                read_utf8_slice(base),
+                read_utf8_slice(game),
+                read_optional_utf8_slice(external_root),
+            )
+        };
+        let (base, game, external) = match inputs {
+            (Ok(base), Ok(game), Ok(external)) => (base, game, external),
+            _ => return SOURCE_ABI_INVALID_ARGUMENT,
+        };
+        let mounts = match source_filesystem::gameinfo::load(
+            std::path::Path::new(base),
+            std::path::Path::new(game),
+            external.map(std::path::Path::new),
+        ) {
+            Ok(mounts) => mounts,
+            Err(error) => {
+                let message = format!("Rust gameinfo mount failed ({game}): {error}");
+                if let Some(log) = context.log {
+                    let message = SourceAbiSlice {
+                        data: message.as_ptr(),
+                        length: message.len() as u64,
+                    };
+                    unsafe { log(context.user_data as *mut c_void, 2, message) };
+                }
+                return match error {
+                    source_filesystem::gameinfo::Error::Io(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        SOURCE_ABI_NOT_FOUND
+                    }
+                    source_filesystem::gameinfo::Error::Io(_) => SOURCE_ABI_IO_ERROR,
+                    source_filesystem::gameinfo::Error::Mount(error) => search_error_status(&error),
+                    _ => SOURCE_ABI_FORMAT_ERROR,
+                };
+            }
+        };
+        unsafe { *out_mount_count = mounts.len() as u64 };
+        *context
+            .filesystem
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = mounts;
+        SOURCE_ABI_OK
+    })
+}
+
+#[no_mangle]
 /// Adds a validated loose directory to the context's ordered content mounts.
 ///
 /// # Safety
@@ -917,7 +1048,7 @@ pub unsafe extern "C" fn source_context_mount_vpk(
 }
 
 #[no_mangle]
-/// Clears the active ordered read mounts while retaining validated VPK indexes
+/// Clears the active ordered read mounts while retaining validated archive indexes
 /// for inexpensive native search-path resynchronization.
 pub extern "C" fn source_context_read_paths_clear(handle: SourceAbiHandle) -> SourceAbiStatus {
     ffi_status(|| {
@@ -1034,6 +1165,61 @@ pub unsafe extern "C" fn source_context_read_path_add_vpk_flags(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match filesystem.mount_vpk_with_flags(directory_path, path_id, position, by_request_only) {
+            Ok(()) => SOURCE_ABI_OK,
+            Err(error) => search_error_status(&error),
+        }
+    })
+}
+
+#[no_mangle]
+/// Adds a ZIP or BSP ZIP range with the native search entry's visibility flags.
+/// Rust opens, validates and owns the archive and entry payloads.
+///
+/// # Safety
+/// Path slices must describe readable UTF-8 bytes for the duration of the call.
+/// Boolean bytes must be zero or one.
+pub unsafe extern "C" fn source_context_read_path_add_pak_flags(
+    handle: SourceAbiHandle,
+    archive_path: SourceAbiSlice,
+    offset: u64,
+    length: u64,
+    path_id: SourceAbiSlice,
+    at_head: u8,
+    by_request_only: u8,
+) -> SourceAbiStatus {
+    ffi_status(|| {
+        let context = match get_context(handle) {
+            Ok(context) => context,
+            Err(status) => return status,
+        };
+        let archive_path = match unsafe { read_utf8_slice(archive_path) } {
+            Ok(path) => path,
+            Err(status) => return status,
+        };
+        let path_id = match unsafe { read_utf8_slice(path_id) } {
+            Ok(path_id) => path_id,
+            Err(status) => return status,
+        };
+        let position = match at_head {
+            0 => source_filesystem::Position::Tail,
+            1 => source_filesystem::Position::Head,
+            _ => return SOURCE_ABI_INVALID_ARGUMENT,
+        };
+        if by_request_only > 1 {
+            return SOURCE_ABI_INVALID_ARGUMENT;
+        }
+        let mut filesystem = context
+            .filesystem
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match filesystem.mount_pak_file_with_flags(
+            archive_path,
+            offset,
+            length,
+            path_id,
+            position,
+            by_request_only != 0,
+        ) {
             Ok(()) => SOURCE_ABI_OK,
             Err(error) => search_error_status(&error),
         }
@@ -2040,7 +2226,7 @@ fn copy_find_entry(
 }
 
 #[no_mangle]
-/// Opens a context-owned cursor over mounted loose and VPK wildcard matches.
+/// Opens a context-owned cursor over selected loose/VPK/ZIP/BSP wildcard matches.
 /// The first unqualified entry name is copied to caller-owned storage.
 ///
 /// # Safety
@@ -2056,6 +2242,37 @@ pub unsafe extern "C" fn source_context_find_first(
     out_is_directory: *mut u32,
     out_find: *mut u64,
 ) -> SourceAbiStatus {
+    unsafe {
+        source_context_find_first_bounded(
+            handle,
+            wildcard,
+            path_id,
+            u32::MAX,
+            output,
+            out_written,
+            out_is_directory,
+            out_find,
+        )
+    }
+}
+
+#[no_mangle]
+/// Opens a cursor with names too long for a fixed-width native field omitted.
+/// The limit excludes a trailing NUL. This is a query limit, independent of the
+/// output buffer: short outputs still publish no cursor and never truncate.
+///
+/// # Safety
+/// Same slice and output contracts as source_context_find_first.
+pub unsafe extern "C" fn source_context_find_first_bounded(
+    handle: SourceAbiHandle,
+    wildcard: SourceAbiSlice,
+    path_id: SourceAbiSlice,
+    max_name_bytes: u32,
+    output: SourceAbiMutSlice,
+    out_written: *mut u64,
+    out_is_directory: *mut u32,
+    out_find: *mut u64,
+) -> SourceAbiStatus {
     ffi_status(|| {
         if out_written.is_null() || out_is_directory.is_null() || out_find.is_null() {
             return SOURCE_ABI_INVALID_ARGUMENT;
@@ -2064,6 +2281,12 @@ pub unsafe extern "C" fn source_context_find_first(
             ptr::write(out_written, 0);
             ptr::write(out_is_directory, 0);
             ptr::write(out_find, 0);
+        }
+        if max_name_bytes == 0
+            || (output.length != 0 && output.data.is_null())
+            || checked_len(output.length).is_err()
+        {
+            return SOURCE_ABI_INVALID_ARGUMENT;
         }
         let context = match get_context(handle) {
             Ok(context) => context,
@@ -2077,7 +2300,7 @@ pub unsafe extern "C" fn source_context_find_first(
             Ok(path_id) => path_id,
             Err(status) => return status,
         };
-        let entries = {
+        let mut entries = {
             let filesystem = context
                 .filesystem
                 .lock()
@@ -2087,6 +2310,7 @@ pub unsafe extern "C" fn source_context_find_first(
                 Err(error) => return search_error_status(&error),
             }
         };
+        entries.retain(|entry| entry.name.len() <= max_name_bytes as usize);
         let Some(first) = entries.first() else {
             return SOURCE_ABI_NOT_FOUND;
         };
@@ -2658,7 +2882,9 @@ unsafe fn write_bytes_out(
     }
     // SAFETY: the caller guarantees `capacity` writable non-overlapping
     // bytes, and the length was checked to fit within them.
-    unsafe { ptr::copy_nonoverlapping(produced.as_ptr(), out_bytes, produced.len()) };
+    if !produced.is_empty() {
+        unsafe { ptr::copy_nonoverlapping(produced.as_ptr(), out_bytes, produced.len()) };
+    }
     SOURCE_ABI_OK
 }
 
@@ -5934,6 +6160,83 @@ mod tests {
             data: bytes.as_ptr(),
             length: bytes.len() as u64,
         }
+    }
+
+    #[test]
+    fn gameinfo_startup_mounts_selected_world_and_preserves_mounts_on_failure() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("source-abi-gameinfo-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("episode/maps")).unwrap();
+        std::fs::write(
+            root.join("episode/gameinfo.txt"),
+            b"GameInfo { FileSystem { SearchPaths { game |gameinfo_path|. } } }",
+        )
+        .unwrap();
+        std::fs::write(root.join("episode/maps/episode.bsp"), synthetic_world_bsp()).unwrap();
+        let config = SourceAbiContextConfig {
+            log: None,
+            ..config()
+        };
+        let mut handle = 0;
+        assert_eq!(
+            unsafe { source_context_create(&config, &mut handle) },
+            SOURCE_ABI_OK
+        );
+        let base = slice(root.to_str().unwrap().as_bytes());
+        let mut count = 99;
+        assert_eq!(
+            unsafe {
+                source_context_mount_gameinfo(
+                    handle,
+                    base,
+                    slice(b"episode"),
+                    slice(b""),
+                    ptr::null_mut(),
+                )
+            },
+            SOURCE_ABI_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe {
+                source_context_mount_gameinfo(
+                    handle,
+                    base,
+                    slice(b"episode"),
+                    slice(b""),
+                    &mut count,
+                )
+            },
+            SOURCE_ABI_OK
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            unsafe {
+                source_context_mount_gameinfo(
+                    handle,
+                    base,
+                    slice(b"missing"),
+                    slice(b""),
+                    &mut count,
+                )
+            },
+            SOURCE_ABI_NOT_FOUND
+        );
+        assert_eq!(count, 0);
+        let mut world = SourceAbiWorldInfo::default();
+        assert_eq!(
+            unsafe {
+                source_context_world_load(
+                    handle,
+                    slice(b"maps/episode.bsp"),
+                    slice(b"GAME"),
+                    &mut world,
+                )
+            },
+            SOURCE_ABI_OK
+        );
+        assert!(world.leaf_count > 0);
+        assert_eq!(source_context_destroy(handle), SOURCE_ABI_OK);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

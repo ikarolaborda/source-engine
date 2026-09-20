@@ -6,6 +6,8 @@ publish.workspace = true
 license-file = "../../../LICENSE"
 
 [dependencies]
+source-bsp = { path = "../source-bsp" }
+source-keyvalues = { path = "../source-keyvalues" }
 source-pak = { path = "../source-pak" }
 source-vpk = { path = "../source-vpk" }
 

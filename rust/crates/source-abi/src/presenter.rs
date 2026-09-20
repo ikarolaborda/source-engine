@@ -13,12 +13,17 @@
 //! alternative is a crash somewhere else later.
 
 use crate::{
-    ffi_status, SourceAbiHandle, SourceAbiStatus, NEXT_HANDLE, SOURCE_ABI_INTERNAL_ERROR,
-    SOURCE_ABI_INVALID_ARGUMENT, SOURCE_ABI_INVALID_HANDLE, SOURCE_ABI_OK,
+    ffi_status, SourceAbiHandle, SourceAbiStatus, SOURCE_ABI_INTERNAL_ERROR,
+    SOURCE_ABI_INVALID_ARGUMENT, SOURCE_ABI_INVALID_HANDLE,
 };
+#[cfg(target_os = "macos")]
+use crate::{NEXT_HANDLE, SOURCE_ABI_OK};
+#[cfg(target_os = "macos")]
 use std::cell::RefCell;
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
 use std::ffi::c_void;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "macos")]
@@ -250,7 +255,7 @@ pub unsafe extern "C" fn source_render_world_load(
 
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (handle, filesystem, out_drawn);
+            let _ = (handle, filesystem, map, out_drawn);
             SOURCE_ABI_INTERNAL_ERROR
         }
 

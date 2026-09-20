@@ -151,6 +151,7 @@ private:
 	void UnloadAllModules( );
 	void RemoveAllSystems();
 
+#if !defined( SOURCE_RUST_ENGINE )
 	// Method to connect/disconnect all systems
 	bool ConnectSystems( );
 	void DisconnectSystems();
@@ -158,6 +159,8 @@ private:
 	// Method to initialize/shutdown all systems
 	InitReturnVal_t InitSystems();
 	void ShutdownSystems();
+#endif
+	static int32 RustLifecycleStep( void *userData, uint32 operation, uint32 index );
  
 	// Gets at the parent appsystem group
 	CAppSystemGroup *GetParent();
@@ -179,6 +182,9 @@ private:
 	CUtlDict<int, unsigned short> m_SystemDict;
 	CAppSystemGroup *m_pParentAppSystem;
 	AppSystemGroupStage_t m_nErrorStage;
+	// Always present so consumers built with different defines share a layout.
+	// Zero is inactive; all-bits-one guards callbacks currently in flight.
+	uint64 m_nRustLifecycleHandle;
 
 	friend void *AppSystemCreateInterfaceFn(const char *pName, int *pReturnCode);
 	friend class CSteamAppSystemGroup;
@@ -261,5 +267,4 @@ SuggestGameInfoDirFn_t SetSuggestGameInfoDirFn( SuggestGameInfoDirFn_t pfnNewFn 
 
 
 #endif // APPSYSTEMGROUP_H
-
 

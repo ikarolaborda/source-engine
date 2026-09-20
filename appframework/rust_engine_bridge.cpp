@@ -210,8 +210,9 @@ extern "C" SourceAbiStatus source_rust_bridge_find_first( const char *wildcard,
 	SourceAbiMutSlice outputSlice;
 	outputSlice.data = static_cast<uint8_t *>( output );
 	outputSlice.length = outputLength;
-	return source_context_find_first( handle, wildcardSlice, pathIdSlice,
-		outputSlice, written, isDirectory, find );
+	if ( outputLength == 0 || outputLength > UINT32_MAX ) return SOURCE_ABI_INVALID_ARGUMENT;
+	return source_context_find_first_bounded( handle, wildcardSlice, pathIdSlice,
+		static_cast<uint32_t>( outputLength ), outputSlice, written, isDirectory, find );
 }
 
 extern "C" SourceAbiStatus source_rust_bridge_find_next( uint64_t find,
@@ -291,6 +292,118 @@ extern "C" SourceAbiStatus source_rust_bridge_write_paths_clear()
 	if ( handle == 0 )
 		return SOURCE_ABI_INVALID_ARGUMENT;
 	return source_context_write_paths_clear( handle );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_run_app_system_group(
+	SourceAbiAppSystemFn callback, void *userData, int32_t *result )
+{
+	return source_host_run_app_system_group( callback, userData, result );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_pak_index_destroy( uint64_t handle )
+{
+	return source_pak_index_destroy( handle );
+}
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_create(SourceAbiMountDropFn dropFn, SourceAbiMountCloneFn cloneFn, uint64_t *handle)
+{ return source_mount_table_create(dropFn, cloneFn, handle); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_insert(uint64_t handle, uint32_t index, void *resource)
+{ return source_mount_table_insert(handle, index, resource); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_count(uint64_t handle, uint32_t *count)
+{ return source_mount_table_count(handle, count); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_get(uint64_t handle, uint32_t index, void **resource)
+{ return source_mount_table_get(handle, index, resource); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_remove(uint64_t handle, uint32_t index, uint8_t fast)
+{ return source_mount_table_remove(handle, index, fast); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_clear(uint64_t handle)
+{ return source_mount_table_clear(handle); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_snapshot(uint64_t handle, uint64_t *copy)
+{ return source_mount_table_snapshot(handle, copy); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_table_destroy(uint64_t handle)
+{ return source_mount_table_destroy(handle); }
+extern "C" SourceAbiStatus source_rust_bridge_mount_store_id_next(int32_t *id)
+{ return source_mount_store_id_next(id); }
+
+extern "C" SourceAbiStatus source_rust_bridge_read_path_matches(
+	const char *stored, uint64_t storedLength, const char *requested, uint64_t requestedLength,
+	bool hasRequested, bool byRequestOnly, bool isMapPack, uint32_t *matches )
+{
+	SourceAbiSlice storedSlice = { reinterpret_cast<const uint8_t *>( stored ), storedLength };
+	SourceAbiSlice requestedSlice = { reinterpret_cast<const uint8_t *>( requested ), requestedLength };
+	return source_read_path_matches( storedSlice, requestedSlice, hasRequested ? 1 : 0,
+		byRequestOnly ? 1 : 0, isMapPack ? 1 : 0, matches );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_search_plan_create(
+	const SourceAbiSearchPath *paths, uint32_t count, SourceAbiSlice requested,
+	uint8_t hasRequested, uint32_t filter, uint64_t *handle)
+{
+	return source_search_plan_create(paths, count, requested, hasRequested, filter, handle);
+}
+extern "C" SourceAbiStatus source_rust_bridge_search_plan_next(uint64_t handle, uint32_t *index)
+{ return source_search_plan_next(handle, index); }
+extern "C" SourceAbiStatus source_rust_bridge_search_visits_create(uint64_t *handle)
+{ return source_search_visits_create(handle); }
+extern "C" SourceAbiStatus source_rust_bridge_search_visits_mark(uint64_t handle, int32_t store, uint32_t *seen)
+{ return source_search_visits_mark(handle, store, seen); }
+extern "C" SourceAbiStatus source_rust_bridge_search_state_reset(uint64_t handle)
+{ return source_search_state_reset(handle); }
+extern "C" SourceAbiStatus source_rust_bridge_search_state_destroy(uint64_t handle)
+{ return source_search_state_destroy(handle); }
+extern "C" SourceAbiStatus source_rust_bridge_read_path_add_pak_index(
+	uint64_t index, const char *pathId, uint64_t pathIdLength, bool atHead, bool byRequestOnly )
+{
+	const SourceAbiHandle handle = g_ActiveRustEngineHandle.load( std::memory_order_acquire );
+	SourceAbiSlice pathIdSlice = { reinterpret_cast<const uint8_t *>( pathId ), pathIdLength };
+	return source_context_read_path_add_pak_index( handle, index, pathIdSlice,
+		atHead ? 1 : 0, byRequestOnly ? 1 : 0 );
+}
+extern "C" SourceAbiStatus source_rust_bridge_find_pack_candidates(
+	SourceAbiSlice root, uint32_t naming, SourceAbiSlice language, SourceAbiMutSlice output,
+	uint64_t *written, uint32_t *isDirectory, uint64_t *find )
+{
+	const SourceAbiHandle handle = g_ActiveRustEngineHandle.load( std::memory_order_acquire );
+	return source_context_find_pack_candidates( handle, root, naming, language, output, written, isDirectory, find );
+}
+extern "C" SourceAbiStatus source_rust_bridge_find_first_pak(
+	uint64_t index, SourceAbiSlice pattern, SourceAbiMutSlice output,
+	uint64_t *written, uint32_t *isDirectory, uint64_t *find )
+{
+	const SourceAbiHandle handle = g_ActiveRustEngineHandle.load( std::memory_order_acquire );
+	return source_context_find_first_pak( handle, index, pattern, output, written, isDirectory, find );
+}
+extern "C" SourceAbiStatus source_rust_bridge_file_open_pak(
+	uint64_t index, uint32_t entry, uint64_t *file, uint64_t *size, uint64_t *absoluteOffset )
+{
+	const SourceAbiHandle handle = g_ActiveRustEngineHandle.load( std::memory_order_acquire );
+	return source_context_file_open_pak( handle, index, entry, file, size, absoluteOffset );
+}
+extern "C" SourceAbiStatus source_rust_bridge_pak_index_open_archive(
+	SourceAbiSlice path, uint32_t kind, uint64_t *handle, SourceAbiPakArchiveInfo *info )
+{
+	return source_pak_index_open_archive( path, kind, handle, info );
+}
+extern "C" SourceAbiStatus source_rust_bridge_pak_index_find(
+	uint64_t handle, SourceAbiSlice path, SourceAbiPakEntry *entry )
+{
+	return source_pak_index_find( handle, path, entry );
+}
+extern "C" SourceAbiStatus source_rust_bridge_pak_index_entry(
+	uint64_t handle, uint32_t index, SourceAbiPakEntry *entry,
+	uint8_t *name, uint64_t capacity, uint64_t *written )
+{
+	return source_pak_index_entry( handle, index, entry, name, capacity, written );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_app_group_startup(
+	SourceAbiAppSystemFn callback, void *userData, uint64_t *handle, int32_t *result )
+{
+	return source_host_app_group_startup( callback, userData, handle, result );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_app_group_shutdown(
+	uint64_t handle, SourceAbiAppSystemFn callback, void *userData )
+{
+	return source_host_app_group_shutdown( handle, callback, userData );
 }
 
 extern "C" SourceAbiStatus source_rust_bridge_write_path_add( const char *root,
@@ -731,6 +844,35 @@ extern "C" SourceAbiStatus source_rust_bridge_lzss_actual_size( const void *inpu
 	inputSlice.data = reinterpret_cast<const uint8_t *>( input );
 	inputSlice.length = inputLength;
 	return source_compress_lzss_actual_size( inputSlice, actualSize );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_snappy_max_size( uint64_t inputLength,
+	uint64_t *size )
+{
+	return source_compress_snappy_max_size( inputLength, size );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_snappy_compress( const void *input,
+	uint64_t inputLength, void *output, uint64_t capacity, uint64_t *length )
+{
+	SourceAbiSlice bytes = { reinterpret_cast<const uint8_t *>( input ), inputLength };
+	return source_compress_snappy_compress( bytes, reinterpret_cast<uint8_t *>( output ),
+		capacity, length );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_buffer_actual_size( const void *input,
+	uint64_t inputLength, uint64_t *size )
+{
+	SourceAbiSlice bytes = { reinterpret_cast<const uint8_t *>( input ), inputLength };
+	return source_compress_buffer_actual_size( bytes, size );
+}
+
+extern "C" SourceAbiStatus source_rust_bridge_buffer_decompress( const void *input,
+	uint64_t inputLength, void *output, uint64_t capacity, uint64_t *length )
+{
+	SourceAbiSlice bytes = { reinterpret_cast<const uint8_t *>( input ), inputLength };
+	return source_compress_buffer_decompress( bytes, reinterpret_cast<uint8_t *>( output ),
+		capacity, length );
 }
 
 extern "C" SourceAbiStatus source_rust_bridge_split_packet_header_encode(
@@ -1441,6 +1583,16 @@ SourceAbiStatus CRustEngineBridge::ExecutableBase(void *output, uint64_t outputL
 	outputSlice.data = static_cast<uint8_t *>(output);
 	outputSlice.length = outputLength;
 	return source_context_executable_base(m_Handle, outputSlice, written);
+}
+
+SourceAbiStatus CRustEngineBridge::MountGameInfo(const char *base, uint64_t baseLength,
+	const char *game, uint64_t gameLength, const char *externalRoot,
+	uint64_t externalRootLength, uint64_t *mountCount) const
+{
+	SourceAbiSlice baseSlice = { reinterpret_cast<const uint8_t *>(base), baseLength };
+	SourceAbiSlice gameSlice = { reinterpret_cast<const uint8_t *>(game), gameLength };
+	SourceAbiSlice externalSlice = { reinterpret_cast<const uint8_t *>(externalRoot), externalRootLength };
+	return source_context_mount_gameinfo(m_Handle, baseSlice, gameSlice, externalSlice, mountCount);
 }
 
 SourceAbiStatus CRustEngineBridge::MountDirectory(const char *root, uint64_t rootLength,

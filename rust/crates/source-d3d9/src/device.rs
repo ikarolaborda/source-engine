@@ -1028,7 +1028,15 @@ impl Device {
         let slice_bytes = pitch * texture.info.rows(height);
         let mut data = vec![0u8; slice_bytes * depth as usize];
 
-        if readback {
+        // A normal D3D texture lock is read/write, not discard. In particular,
+        // lightmaps relock a whole atlas and overwrite only selected tiles.
+        // Starting each lock at zero erased the other tiles at unlock, turning
+        // unrelated materials on the same page black. Seed native-format locks
+        // from the current texture; synchronize first because it may also have
+        // been written by a queued GPU copy or render pass. Expanded formats
+        // still use the existing upload-only path (their CPU/GPU layouts differ).
+        let preserve = texture.shared && texture.info.expand == format::Expand::None;
+        if readback || preserve {
             if !texture.shared || texture.info.expand != format::Expand::None {
                 self.warn_once(String::from(
                     "a depth surface was locked for reading, which is not supported",

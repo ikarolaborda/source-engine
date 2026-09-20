@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use source_compress::snappy;
 use source_compress::{actual_size, compress, decompress, is_compressed, is_snappy};
 
 fuzz_target!(|data: &[u8]| {
@@ -10,6 +11,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = is_snappy(data);
     let _ = actual_size(data);
     let _ = decompress(data);
+    let _ = snappy::actual_size(data);
+    let _ = snappy::decompress(data, 1 << 20);
+    let packed = snappy::compress(data).unwrap();
+    assert_eq!(snappy::decompress(&packed, data.len()).as_deref(), Ok(data));
 
     // A stream carrying the tag gets much further into the decoder than one
     // that does not, so the tag is forced on rather than left to chance.
@@ -17,6 +22,8 @@ fuzz_target!(|data: &[u8]| {
         let mut tagged = data.to_vec();
         tagged[..4].copy_from_slice(b"LZSS");
         let _ = decompress(&tagged);
+        tagged[..4].copy_from_slice(b"SNAP");
+        let _ = snappy::decompress(&tagged, 1 << 20);
     }
 
     // Whatever the encoder accepts has to come back unchanged, and has to

@@ -4,6 +4,113 @@ Written 2026-09-19 on branch `rust-port`, with the work of that day
 uncommitted in the tree. It continues from [`handoff.md`](handoff.md) and
 [`d3d9-metal.md`](d3d9-metal.md).
 
+**2026-09-20 continuation:** the six outstanding targets now build, and
+Episode One and Episode Two pass direct-map Metal smoke gates after replacing
+the HL2-only startup mounts. See [the follow-up evidence](validation-2026-09-20.md)
+for current results and outstanding checks. The dated findings below remain
+the original baseline, not a description of the updated tree.
+Later increments on the same date move generic LZSS/Snappy buffers and ordinary
+relative ZIP/BSP archive reads into Rust; the linked validation records the
+corpus/differential results and a still-unresolved ToGL failure-shutdown crash.
+The subsequent lifecycle increment moves synchronous app-system startup and
+rollback into Rust and verifies clean injected shader-init failure on both
+renderers. The cause of intermittent empty ToGL adapter enumeration is still
+unresolved; see the dated record rather than treating the original failure as
+a pass.
+The separate Startup/Shutdown path now also uses Rust lifecycle state, including
+duplicate/reentrant cleanup guards. Its ABI tests, live injected-failure checks
+on both renderers and fixed-camera Metal load/exit check pass; individual
+subsystem bodies remain native. See the same dated validation record.
+All eight game targets have since been rebuilt after those shared changes;
+the installed ARM64 libraries and Rust interface exports pass a package audit.
+The CI workflow now includes all eight build targets, without claiming runtime
+coverage for the six games whose content is unavailable.
+The next filesystem increment replaces the native pack filename/hash table and
+directory parser in Rust builds with a Rust-owned metadata index. Native
+absolute pack reads and BSP wildcard filtering still remain; see the dated
+record for corpus, native-library and runtime checks.
+The subsequent increments move the index's initial ZIP-range read and then
+absolute/filtered pack payload reads, stored/LZMA decoding, CRC validation and
+cursors into Rust. Native payload reader classes are excluded from Rust builds;
+a thin file-handle adapter remains. Rust now also owns standalone ZIP length
+discovery and BSP header/range extraction on that same retained descriptor.
+Pack wildcard matching, implied directories and deduplication now also run in
+Rust. Numbered ZIP candidate discovery and precedence now also run in Rust,
+including first-gap termination and optional Xbox localized naming. Native
+mount selection/trust and public file/find adapters still prevent full
+pack-adapter retirement. See the dated validation for the tested limits.
+All eight game targets have now been rebuilt again after these filesystem
+increments. The final package audit passes for all 16 game libraries and 28
+shared libraries. The native filesystem gate now also passes 200 map-replacement
+cycles with retained old-map handles; this is not a campaign-transition test.
+The following shared-owner increment consolidates ordinary mounts and explicit
+pack reads onto one Rust archive index/descriptor. Native mount synchronization
+now passes an opaque index instead of reopening a path/range. Obsolete C++
+range mirrors and three unused private bridge exports are removed. This latest
+increment rebuilt HL2/shared libraries and passed the all-eight static package
+audit; the full source matrix above predates this increment. Native mount
+registration, selection/trust and public adapters still remain.
+
+The following increment moves read-path ID selection into a shared Rust policy
+used by both ordinary Rust queries and the remaining native iterator. The BSP
+selector uses retained typed archive provenance, not filename extensions, and
+selects only GAME map packs. Native ordered registration, store-ID suppression,
+trust and public adapters still remain. See the dated validation for the
+compatibility checks and the retained BSP text adapter.
+The next increment moves iterator order/position and duplicate-store tracking
+into Rust-owned search plans/visit sets. Native snapshots retain legacy resource
+references, while Rust returns selected indices. Mount registration, store-ID
+assignment, Xbox exclusion inputs and trust remain native; this is not full
+filesystem ownership or adapter retirement.
+The next mount-table increment gives Rust ownership of the live ordered table,
+iterator snapshot tables and native resource leases through explicit clone/drop
+callbacks. The positive store-ID allocator is also Rust-owned. Native path
+metadata, duplicate/repositioning decisions, map CRC identities and archive
+reuse remain to be migrated; the opaque native resource callbacks are still
+transitional. See the dated validation for lifecycle and matrix evidence.
+All eight source targets have now been rebuilt and installed after this
+increment; the final native gate and Episode Two Metal load/exit check pass.
+
+**Manual gameplay handoff (2026-09-20):** prioritize migration implementation
+and cheap, targeted checks. The user will play and report gameplay/rendering
+flaws; do not routinely repeat expensive matrices, fuzz runs or automated
+gameplay loops. The current isolated HL2 build supports an unrestricted
+manual session, but is still a hybrid Rust/C++ engine, not the completed Rust
+port. Launch from a terminal (3840×2160 requested; requires a suitable display):
+
+```sh
+cd /Users/ikarolaborda/source-engine
+sh scripts/play_rust_hl2_metal.sh -w 3840 -h 2160
+```
+
+Choose New Game or Load Game. Rust integration is compiled into this launcher;
+there is no additional Rust activation flag. This command has no test script,
+automatic quit, muted sound or disabled mouse input. Full campaign correctness
+and actual 4K presentation have not been verified. The existing automated gates
+establish load/exit only, not gameplay or dialogue correctness.
+The play script opens the menu without `+map`, enables full captions and raw
+mouse input, and leaves video settings selectable. Omit `-w/-h` on subsequent
+launches to use the saved resolution. After the user quit, the Metal video-options
+correction and lightmap-lock fix were installed in `out-rust-allgames`; the
+shared libraries and launcher in `out-rust-episodic` were also refreshed.
+
+**Manual-play lightmap report:** `wood/woodfloor005a` and many other surfaces
+appear black, but the floor texture appears with `mat_fullbright 1`. A small
+Metal ABI reproduction confirms that writable locks were zeroing untouched
+lightmap texels when the engine relocks an entire page and edits only part of
+it. The Rust device now preserves native-format texture contents before a
+writable lock. The old installed library fails the reproduction; the rebuilt
+library passes for LDR, integer HDR and float HDR. This fixes a shared resource
+bug, not a material-name special case. Gameplay confirmation and performance
+impact of synchronized readback remain unverified; expanded-format upload
+semantics remain unchanged. See `rust/tests/metal_texture_lock.py`.
+
+**User clarification:** the Episode Two lips/speech report concerns the antlion
+defense while the vortigaunts heal Alyx (`ep2_outland_02`). The scene is no longer
+unknown. Walking/turning loops are not an acceptance test for this report; a
+relevant check must capture visible speaking NPCs and their audio in that scene.
+The report remains unresolved.
+
 ## The rule this is written under
 
 Every statement below is one of three things, and says which:

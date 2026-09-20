@@ -33,6 +33,152 @@ typedef struct SourceAbiMutSlice {
 } SourceAbiMutSlice;
 
 typedef int32_t SourceAbiStatus;
+
+/* Metadata-only ZIP/BSP index. Offsets are relative to the ZIP; input bytes are
+ * borrowed only during create. Stored/LZMA payload decoding/CRC is separate.
+ * The reserved __preload_section.pre cache entry is hidden. Call destroy before
+ * unloading the ABI library. Queries may run concurrently; no native pointer
+ * is retained. The native adapter and Rust both bound archives to 512 MiB. */
+#define SOURCE_PAK_INDEX_MAX_ARCHIVE_BYTES (512u * 1024u * 1024u)
+typedef struct SourceAbiPakEntry {
+	uint64_t data_offset;
+	uint32_t length, compressed_length, method, index, crc32, reserved;
+} SourceAbiPakEntry;
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_create(
+	SourceAbiSlice input, uint64_t *out_handle, uint32_t *out_count);
+/* Read-only UTF-8 regular-file path and ZIP byte range. Rust retains the file
+ * descriptor and metadata but releases the temporary buffer. Payload opens use
+ * that descriptor, validating size/CRC (not an atomic file snapshot guarantee).
+ * Invalid ranges return IO_ERROR; malformed/oversized ZIPs return FORMAT_ERROR.
+ * Outputs are zeroed on failure when
+ * both are provided. An in-bounds zero-byte range is valid (empty BSP lump).
+ * No native read callback or parser fallback is used. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_open_file(
+	SourceAbiSlice path, uint64_t offset, uint64_t length,
+	uint64_t *out_handle, uint32_t *out_count);
+typedef struct SourceAbiPakArchiveInfo {
+	uint64_t offset, length;
+	int64_t modified_seconds;
+	uint32_t entry_count, reserved;
+} SourceAbiPakArchiveInfo;
+/* kind 0 = standalone ZIP, 1 = BSP embedded ZIP (versions 19..21).
+ * Rust discovers the range and parses the index on one retained descriptor.
+ * Empty BSP lump returns NOT_FOUND; malformed/truncated headers/ranges return
+ * FORMAT_ERROR. Other map lumps are not validated here. Outputs are zero on
+ * failure when both are provided. Timestamp is Unix seconds (0 if unavailable). */
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_open_archive(
+	SourceAbiSlice path, uint32_t kind, uint64_t *out_handle,
+	SourceAbiPakArchiveInfo *out_info);
+/* Fully validate/decode an entry into an independent context-owned read-only
+ * file. Use the existing context file read/seek/tell/size/close APIs. Seeks
+ * clamp to [0,size]; invalid origins fail without moving. Index destruction
+ * does not close opened files. Slice-created indexes have no payload source
+ * and return INVALID_ARGUMENT. No output handle on failed IO/decoding/CRC. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_file_open_pak(
+	uint64_t context, uint64_t index, uint32_t entry,
+	uint64_t *out_file, uint64_t *out_size, uint64_t *out_absolute_offset);
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_destroy(uint64_t handle);
+/* Context-independent ordered mount ownership. Native resource contexts remain
+ * opaque. Callbacks must not unwind and must support the invoking thread;
+ * callback code/data must outlive every table/snapshot, including module unload.
+ * insert transfers ownership only on OK; failures leave it with the caller.
+ * get borrows until removal: caller serializes native borrows against mutation.
+ * snapshot clones native headers/resources; NULL aborts and releases prior copies.
+ * All drop/clone callbacks run outside locks and may reenter these APIs.
+ * remove fast=0 preserves order; fast=1 swaps in the last entry. Max65536 mounts.
+ * Failed handle/count/get outputs are zero/NULL; index miss is NOT_FOUND. */
+typedef void (*SourceAbiMountDropFn)(void *resource);
+typedef void *(*SourceAbiMountCloneFn)(const void *resource);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_create(SourceAbiMountDropFn dropFn, SourceAbiMountCloneFn cloneFn, uint64_t *handle);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_insert(uint64_t handle, uint32_t index, void *resource);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_count(uint64_t handle, uint32_t *count);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_get(uint64_t handle, uint32_t index, void **resource);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_remove(uint64_t handle, uint32_t index, uint8_t fast);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_clear(uint64_t handle);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_snapshot(uint64_t handle, uint64_t *copy);
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_table_destroy(uint64_t handle);
+/* Monotonic positive store IDs; returns INTERNAL_ERROR instead of wrapping. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_mount_store_id_next(int32_t *out_id);
+
+typedef struct SourceAbiSearchPath {
+	SourceAbiSlice path_id;
+	int32_t store_id;
+	uint32_t flags;
+} SourceAbiSearchPath;
+enum {
+	SOURCE_SEARCH_PACK = 1, SOURCE_SEARCH_MAP = 2,
+	SOURCE_SEARCH_BY_REQUEST = 4, SOURCE_SEARCH_EXCLUDED = 8
+};
+/* Context-independent immutable search plan. Copies only selected source
+ * indices, not pointers/resources. Up to 65536 paths, UTF-8 IDs up to 4096 bytes.
+ * Filter 0=all, 1=cull ZIP/BSP, 2=cull non-ZIP/BSP; VPK is non-pack here.
+ * Filtering precedes store-ID deduplication. MAP requires PACK; no unknown bits.
+ * has_requested is 0/1; absent requires an empty slice. Empty explicit ID is valid.
+ * Failed creation zeros out_handle. The caller retains its resource snapshot. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_plan_create(
+	const SourceAbiSearchPath *paths, uint32_t count, SourceAbiSlice requested,
+	uint8_t has_requested, uint32_t filter, uint64_t *out_handle);
+/* Exhaustion is NOT_FOUND and out_index=UINT32_MAX; invalid calls don't advance. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_plan_next(uint64_t handle, uint32_t *out_index);
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_visits_create(uint64_t *out_handle);
+/* Only a visits handle: out_seen=1 for a duplicate, 0 for new, 1 on error. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_visits_mark(uint64_t handle, int32_t store, uint32_t *out_seen);
+/* Reset rewinds a plan or clears visits. Destroy exactly once; stale => INVALID_HANDLE. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_state_reset(uint64_t handle);
+SOURCE_ABI_EXPORT SourceAbiStatus source_search_state_destroy(uint64_t handle);
+/* Context-free native/Rust read-path selection. Flags must be 0/1. With no
+ * requested ID, only non-by-request paths match. Explicit IDs ignore that flag;
+ * BSP matches only GAME map packs. Comparisons are ASCII case-insensitive.
+ * Empty IDs are allowed; has_requested distinguishes an explicit empty ID from
+ * no ID (which requires a zero-length requested slice). Invalid input zeros the
+ * provided result and returns INVALID_ARGUMENT. No IO or native pointers kept. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_read_path_matches(
+	SourceAbiSlice stored, SourceAbiSlice requested, uint8_t has_requested,
+	uint8_t by_request_only, uint8_t is_map_pack, uint32_t *out_matches);
+/* Native fixed-field enumeration: omit names exceeding max_name_bytes (not
+ * including NUL), which must be nonzero. The separate output buffer still uses
+ * BUFFER_TOO_SMALL without publishing/advancing a cursor. No truncation.
+ * Close/advance via context find APIs. The unrestricted find_first is unchanged. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_find_first_bounded(
+	uint64_t context, SourceAbiSlice wildcard, SourceAbiSlice path_id, uint32_t max_name_bytes,
+	SourceAbiMutSlice output, uint64_t *out_written, uint32_t *out_is_directory, uint64_t *out_find);
+/* Mount a shared file-backed index: no reopen/reparse, no native-supplied range.
+ * The mount retains the archive after index-handle destruction. Clearing mounts
+ * does not close independent indexes or decoded files. Metadata-only indexes
+ * return INVALID_ARGUMENT. Flags must be 0 or 1; path ID is nonempty UTF-8. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_read_path_add_pak_index(
+	uint64_t context, uint64_t index, SourceAbiSlice path_id,
+	uint8_t at_head, uint8_t by_request_only);
+/* Snapshot numbered ZIP paths in mount-precedence order: descending numbers,
+ * localized Xbox360 series before base. naming: 0 desktop, 1 Xbox360; empty
+ * language disables localization. Each series stops at the first stat failure;
+ * present malformed archives remain candidates. At most 65536 per series,
+ * otherwise IO_ERROR, no partial snapshot. Full paths (no NUL) retain root
+ * spelling. Empty result => NOT_FOUND. Short first buffer publishes no cursor.
+ * Consume/close with context find_next/find_close; is_directory is always 0.
+ * Snapshot owns names only; files may change before they are opened. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_find_pack_candidates(
+	uint64_t context, SourceAbiSlice root, uint32_t naming, SourceAbiSlice language,
+	SourceAbiMutSlice output, uint64_t *out_written, uint32_t *out_is_directory,
+	uint64_t *out_find);
+/* Archive-local glob using the ordinary Rust ASCII-case-insensitive bytewise
+ * wildcard policy (*, ?, *.*).
+ * Returns canonical relative paths, sorted files then deduplicated implied
+ * directories. A file wins a colliding directory name. Dot/slash normalization
+ * is allowed within the root; escape, absolute paths and wildcard directories
+ * are rejected. No matching entries => NOT_FOUND. Short output reports size
+ * without publishing a cursor. Use context find_next/find_close; the cursor
+ * survives index destruction and does not retain a native pointer. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_find_first_pak(
+	uint64_t context, uint64_t index, SourceAbiSlice pattern, SourceAbiMutSlice output,
+	uint64_t *out_written, uint32_t *out_is_directory, uint64_t *out_find);
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_find(
+	uint64_t handle, SourceAbiSlice path, SourceAbiPakEntry *out_entry);
+/* Canonical name has no NUL. BUFFER_TOO_SMALL reports required length and
+ * metadata without writing name bytes. Out-of-range index returns NOT_FOUND. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_pak_index_entry(
+	uint64_t handle, uint32_t index, SourceAbiPakEntry *out_entry,
+	uint8_t *name, uint64_t capacity, uint64_t *written);
 enum {
 	SOURCE_ABI_OK = 0,
 	SOURCE_ABI_INVALID_ARGUMENT = 1,
@@ -71,6 +217,32 @@ enum {
 typedef void (*SourceAbiLogFn)(void *user_data, int32_t level, SourceAbiSlice message);
 typedef int32_t (*SourceAbiSessionFn)(void *user_data);
 typedef int32_t (*SourceAbiFrameFn)(void *user_data);
+typedef int32_t (*SourceAbiAppSystemFn)(void *user_data, uint32_t operation, uint32_t index);
+
+enum {
+	SOURCE_APP_CREATE = 0, SOURCE_APP_CONNECT = 1, SOURCE_APP_PREINIT = 2,
+	SOURCE_APP_INIT = 3, SOURCE_APP_MAIN = 4, SOURCE_APP_SHUTDOWN = 5,
+	SOURCE_APP_POSTSHUTDOWN = 6, SOURCE_APP_DISCONNECT = 7,
+	SOURCE_APP_REMOVE_SYSTEMS = 8, SOURCE_APP_UNLOAD_MODULES = 9, SOURCE_APP_DESTROY = 10
+};
+
+/* Create returns system count or negative failure. Connect/PreInit/Init return
+ * zero on success; failed callbacks undo their own partial work. Main returns
+ * its exit code. Cleanup callbacks cannot fail. No pointer is retained, no
+ * lock spans a callback, and nested groups are supported. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_host_run_app_system_group(
+	SourceAbiAppSystemFn callback, void *user_data, int32_t *out_result);
+
+/* Split lifecycle: no Main callback. On startup success result=0 and handle!=0;
+ * on subsystem failure result=-1, handle=0, and rollback already completed.
+ * Retains identity addresses only, not dereferenceable native pointers. The
+ * caller must keep native systems alive and shut down on the startup thread
+ * with the same callback/user_data pair before unloading the ABI library.
+ * Duplicate identities and stale/mismatched/reentrant shutdowns are rejected. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_host_app_group_startup(
+	SourceAbiAppSystemFn callback, void *user_data, uint64_t *out_handle, int32_t *out_result);
+SOURCE_ABI_EXPORT SourceAbiStatus source_host_app_group_shutdown(
+	uint64_t handle, SourceAbiAppSystemFn callback, void *user_data);
 
 typedef struct SourceAbiContextConfig {
 	uint32_t struct_size;
@@ -287,7 +459,8 @@ enum {
 
 enum {
 	SOURCE_HOST_SESSION_STOP = 0,
-	SOURCE_HOST_SESSION_RESTART = 1
+	SOURCE_HOST_SESSION_RESTART = 1,
+	SOURCE_HOST_SESSION_FAILED = -1
 };
 
 enum {
@@ -367,6 +540,15 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_context_executable_base(
 	SourceAbiMutSlice output,
 	uint64_t *out_written);
 
+/* Atomically replaces startup GAME read mounts from the selected gameinfo.txt.
+ * external_root is optional (an empty slice); no writable paths are created. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_mount_gameinfo(
+	SourceAbiHandle handle,
+	SourceAbiSlice base,
+	SourceAbiSlice game,
+	SourceAbiSlice external_root,
+	uint64_t *out_mount_count);
+
 /* Adds a loose directory or VPK to the ordered search paths (at_head is 0 or 1). */
 SOURCE_ABI_EXPORT SourceAbiStatus source_context_mount_directory(
 	SourceAbiHandle handle,
@@ -392,6 +574,18 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_context_read_path_add_directory_flags(
 SOURCE_ABI_EXPORT SourceAbiStatus source_context_read_path_add_vpk_flags(
 	SourceAbiHandle handle,
 	SourceAbiSlice directory_path,
+	SourceAbiSlice path_id,
+	uint8_t at_head,
+	uint8_t by_request_only);
+
+/* ZIP byte range in a standalone archive or BSP; Rust owns IO and parsing.
+ * Untyped ranges do not qualify for the reserved BSP path-ID selector. Use a
+ * typed BSP index and read_path_add_pak_index to mount a discoverable map pack. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_context_read_path_add_pak_flags(
+	SourceAbiHandle handle,
+	SourceAbiSlice archive_path,
+	uint64_t offset,
+	uint64_t length,
 	SourceAbiSlice path_id,
 	uint8_t at_head,
 	uint8_t by_request_only);
@@ -609,6 +803,21 @@ SOURCE_ABI_EXPORT SourceAbiStatus source_compress_lzss_decompress(
 SOURCE_ABI_EXPORT SourceAbiStatus source_compress_lzss_actual_size(
 	SourceAbiSlice input,
 	uint64_t *out_actual_size);
+/* Snappy uses Source's SNAP tag, not the Snappy framing format. Compression
+ * may grow data. All buffers are caller-owned and input/output cannot overlap.
+ * Zero-capacity null output queries report BUFFER_TOO_SMALL and required size.
+ * Generic decode accepts SNAP, LZSS, and untagged bytes; tagged corruption is
+ * FORMAT_ERROR and is never copied as plain data. Failed decode leaves output
+ * bytes untouched. actual_size checks only headers and returns DECLINED for
+ * untagged input. Length outputs must always be nonnull. */
+SOURCE_ABI_EXPORT SourceAbiStatus source_compress_snappy_max_size(
+	uint64_t input_length, uint64_t *out_size);
+SOURCE_ABI_EXPORT SourceAbiStatus source_compress_snappy_compress(
+	SourceAbiSlice input, uint8_t *out_bytes, uint64_t capacity, uint64_t *out_length);
+SOURCE_ABI_EXPORT SourceAbiStatus source_compress_buffer_actual_size(
+	SourceAbiSlice input, uint64_t *out_size);
+SOURCE_ABI_EXPORT SourceAbiStatus source_compress_buffer_decompress(
+	SourceAbiSlice input, uint8_t *out_bytes, uint64_t capacity, uint64_t *out_length);
 SOURCE_ABI_EXPORT SourceAbiStatus source_net_split_packet_header_encode(
 	int32_t sequence,
 	uint32_t packet_number,

@@ -24,6 +24,33 @@ case "$(uname -s)" in
 esac
 
 ABI_SYMBOLS="
+	source_mount_table_create \
+	source_mount_table_insert \
+	source_mount_table_count \
+	source_mount_table_get \
+	source_mount_table_remove \
+	source_mount_table_clear \
+	source_mount_table_snapshot \
+	source_mount_table_destroy \
+	source_mount_store_id_next \
+	source_search_plan_create \
+	source_search_plan_next \
+	source_search_visits_create \
+	source_search_visits_mark \
+	source_search_state_reset \
+	source_search_state_destroy \
+	source_pak_index_create \
+	source_pak_index_open_file \
+	source_pak_index_open_archive \
+	source_context_find_first_pak \
+	source_context_find_pack_candidates \
+	source_context_read_path_add_pak_index \
+	source_read_path_matches \
+	source_context_find_first_bounded \
+	source_context_file_open_pak \
+	source_pak_index_destroy \
+	source_pak_index_find \
+	source_pak_index_entry \
 	source_abi_version \
 	source_context_create \
 	source_context_destroy \
@@ -31,11 +58,13 @@ ABI_SYMBOLS="
 	source_context_emit_log \
 	source_context_resolve_content_path \
 	source_context_executable_base \
+	source_context_mount_gameinfo \
 	source_context_mount_directory \
 	source_context_mount_vpk \
 	source_context_read_paths_clear \
 	source_context_read_path_add_directory_flags \
 	source_context_read_path_add_vpk_flags \
+	source_context_read_path_add_pak_flags \
 	source_context_write_paths_clear \
 	source_context_write_path_add \
 	source_context_write_path_add_flags \
@@ -74,6 +103,10 @@ ABI_SYMBOLS="
 	source_compress_lzss_compress \
 	source_compress_lzss_decompress \
 	source_compress_lzss_actual_size \
+	source_compress_snappy_max_size \
+	source_compress_snappy_compress \
+	source_compress_buffer_actual_size \
+	source_compress_buffer_decompress \
 	source_net_split_packet_header_encode \
 	source_net_split_packet_header_decode \
 	source_context_split_packet_create \
@@ -134,6 +167,9 @@ ABI_SYMBOLS="
 	source_context_host_pending_operation \
 	source_context_host_clear_operation \
 	source_context_host_run_sessions \
+	source_host_run_app_system_group \
+	source_host_app_group_startup \
+	source_host_app_group_shutdown \
 	source_context_host_run_frames \
 	source_context_cvar_register \
 	source_context_cvar_set \
@@ -149,12 +185,61 @@ ABI_SYMBOLS="
 	source_context_read_vpk_file \
 	source_context_probe_vpk_scene \
 	source_context_live_count \
-	source_context_force_panic_for_test
+	source_context_force_panic_for_test \
+	source_render_presenter_create \
+	source_render_presenter_destroy \
+	source_render_presenter_drawable_size \
+	source_render_presenter_present \
+	source_render_presenter_resize \
+	source_render_ui_begin \
+	source_render_ui_end \
+	source_render_ui_has_texture \
+	source_render_ui_quad \
+	source_render_ui_texture \
+	source_render_ui_texture_alias \
+	source_render_ui_texture_region \
+	source_render_world_load \
+	source_render_world_present
 "
+
+# The D3D9 device ABI is compiled only on macOS. Keep the list explicit so a
+# new export still requires updating the contract, rather than accepting all
+# symbols merely because they share a renderer prefix.
+if [ "$(uname -s)" = "Darwin" ]; then
+	ABI_SYMBOLS="$ABI_SYMBOLS
+		source_d3d9_buffer_create
+		source_d3d9_buffer_destroy
+		source_d3d9_buffer_lock
+		source_d3d9_buffer_unlock
+		source_d3d9_clear
+		source_d3d9_device_create
+		source_d3d9_device_destroy
+		source_d3d9_device_reset
+		source_d3d9_display_info
+		source_d3d9_draw
+		source_d3d9_draw_indexed
+		source_d3d9_format_supported
+		source_d3d9_present
+		source_d3d9_query_create
+		source_d3d9_query_destroy
+		source_d3d9_query_get_data
+		source_d3d9_query_issue
+		source_d3d9_read_render_target
+		source_d3d9_set_window
+		source_d3d9_shader_create
+		source_d3d9_shader_destroy
+		source_d3d9_stretch_rect
+		source_d3d9_texture_create
+		source_d3d9_texture_destroy
+		source_d3d9_texture_lock
+		source_d3d9_texture_unlock
+		source_d3d9_vertex_declaration_create
+		source_d3d9_vertex_declaration_destroy"
+fi
 
 for symbol in $ABI_SYMBOLS
 do
-	echo "$EXPORTED_SYMBOLS" | grep "_$symbol\| $symbol$" >/dev/null || {
+	echo "$EXPORTED_SYMBOLS" | grep -E "[[:space:]]_?${symbol}$" >/dev/null || {
 		echo "missing exported ABI symbol: $symbol" >&2
 		exit 1
 	}
@@ -197,6 +282,12 @@ fi
 	-o "$TARGET_DIR/abi_unload_smoke"
 "$TARGET_DIR/abi_unload_smoke" "$DYLIB"
 
+"$CXX" -std=c++11 -Wall -Wextra -Werror -pthread -I"$ROOT/public" \
+	"$ROOT/rust/tests/app_system_lifecycle.cpp" \
+	-L"$TARGET_DIR/debug" -lsource_abi "$RPATH_FLAG" \
+	-o "$TARGET_DIR/app_system_lifecycle"
+"$TARGET_DIR/app_system_lifecycle"
+
 # The LZSS differential links the real tier1 codec next to the Rust one and
 # requires them to produce identical bytes. Agreeing on the format is not
 # enough for a save file: the two encoders have to make the same match choices
@@ -227,3 +318,36 @@ NATIVE_DEFINES="$NATIVE_DEFINES -DTIER1_STATIC_LIB=1 -DNO_MEMOVERRIDE_NEW_DELETE
 	-L"$TARGET_DIR/debug" -lsource_abi "$RPATH_FLAG" \
 	-o "$TARGET_DIR/lzss_differential"
 "$TARGET_DIR/lzss_differential"
+
+# Independently compile the retained Snappy oracle. Rust owns the runtime codec;
+# this test proves bidirectional wire compatibility, not identical match choices.
+# shellcheck disable=SC2086
+"$CXX" -std=c++11 $NATIVE_DEFINES \
+	-I"$ROOT/public" -I"$ROOT/public/tier1" -I"$ROOT/tier1" \
+	-c "$ROOT/tier1/snappy.cpp" -o "$TARGET_DIR/snappy_native.o"
+# shellcheck disable=SC2086
+"$CXX" -std=c++11 $NATIVE_DEFINES \
+	-I"$ROOT/public" -I"$ROOT/public/tier1" -I"$ROOT/tier1" \
+	-c "$ROOT/tier1/snappy-sinksource.cpp" -o "$TARGET_DIR/snappy_sinksource_native.o"
+# shellcheck disable=SC2086
+"$CXX" -std=c++11 $NATIVE_DEFINES \
+	-I"$ROOT/public" -I"$ROOT/public/tier1" -I"$ROOT/tier1" \
+	-c "$ROOT/tier1/snappy-stubs-internal.cpp" -o "$TARGET_DIR/snappy_stubs_native.o"
+# shellcheck disable=SC2086
+"$CXX" -std=c++11 -Wall -Wextra -Werror $NATIVE_DEFINES \
+	-I"$ROOT" -I"$ROOT/public" \
+	"$ROOT/rust/tests/snappy_differential.cpp" "$TARGET_DIR/snappy_native.o" \
+	"$TARGET_DIR/snappy_sinksource_native.o" "$TARGET_DIR/snappy_stubs_native.o" \
+	"$TARGET_DIR/lzss_native_stub.o" \
+	-L"$TARGET_DIR/debug" -lsource_abi "$RPATH_FLAG" \
+	-o "$TARGET_DIR/snappy_differential"
+"$TARGET_DIR/snappy_differential"
+
+# Source's SDK emits size-terminated LZMA (no EOS), unlike Python's ZIP writer.
+# Compile it only as a differential oracle; it is not a Rust runtime dependency.
+PAK_ORACLE="$TARGET_DIR/pak_lzma_oracle.so"
+"$CC" -shared -fPIC -D_7ZIP_ST \
+	"$ROOT/utils/lzma/C/LzmaLib.c" "$ROOT/utils/lzma/C/LzmaEnc.c" \
+	"$ROOT/utils/lzma/C/LzmaDec.c" "$ROOT/utils/lzma/C/LzFind.c" \
+	"$ROOT/utils/lzma/C/Alloc.c" -o "$PAK_ORACLE"
+SOURCE_PAK_NATIVE_LZMA="$PAK_ORACLE" python3 "$ROOT/rust/tests/pak_differential.py" "$DYLIB"

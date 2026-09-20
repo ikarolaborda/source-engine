@@ -9,6 +9,8 @@ publish.workspace = true
 # For the CRC the ZIP format checks entries with, which is the same
 # polynomial the VPK directory uses.
 source-vpk = { path = "../source-vpk" }
+# ZIP method 14, also accepted by the native Source pack reader. Pure Rust.
+lzma-rs = "=0.3.0"
 
 [lints]
 workspace = true

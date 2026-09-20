@@ -65,8 +65,10 @@ do
 	fi
 done
 if [ ! -e "$DEST/platform" ] && [ ! -L "$DEST/platform" ]; then
-	ln -s "$GAME/platform" "$DEST/platform"
+	cp -RL "$GAME/platform" "$DEST/platform"
 fi
+SCRIPT_ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+sh "$SCRIPT_ROOT/scripts/prepare_rust_runtime_writes.sh" "$DEST" hl2
 if [ ! -e "$DEST/steam_appid.txt" ] && [ -f "$GAME/steam_appid.txt" ]; then
 	cp "$GAME/steam_appid.txt" "$DEST/steam_appid.txt"
 fi

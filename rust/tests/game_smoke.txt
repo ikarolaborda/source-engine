@@ -1,0 +1,8 @@
+// +map is deliberately supplied by the launcher, exercising Rust startup mounts.
+Test_WaitForCheckPoint FinishedMapLoad once
+Test_Wait 5
+echo RUST_GAME_SMOKE_LOADED
+getpos 2
+Test_Wait 25
+echo RUST_GAME_SMOKE_COMPLETED
+quit

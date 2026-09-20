@@ -1,4 +1,4 @@
-//! The LZSS codec Source uses for saves, demos and compressed buffers.
+//! Source compressed buffers: LZSS here and the SNAP codec in [`snappy`].
 //!
 //! The layout matches `tier1/lzss.cpp`: an eight-byte header holding the
 //! `LZSS` tag and the uncompressed length, then groups of one command byte
@@ -14,10 +14,11 @@
 
 use std::fmt;
 
+pub mod snappy;
+
 /// `LZSS_ID`, which is the tag `LZSS` as it appears in the first four bytes.
 pub const LZSS_TAG: [u8; 4] = *b"LZSS";
-/// `SNAPPY_ID`, recognised only well enough to report that a buffer is
-/// Snappy rather than LZSS.
+/// `SNAPPY_ID`, Source's envelope around a raw Snappy block.
 pub const SNAPPY_TAG: [u8; 4] = *b"SNAP";
 /// The tag and the uncompressed length.
 pub const HEADER_BYTES: usize = 8;
@@ -131,7 +132,7 @@ pub fn is_compressed(buffer: &[u8]) -> bool {
     buffer.len() >= 4 && buffer[..4] == LZSS_TAG
 }
 
-/// Whether a buffer carries the `SNAP` tag, which this codec does not read.
+/// Whether a buffer carries the `SNAP` tag (decoded by the snappy module).
 pub fn is_snappy(buffer: &[u8]) -> bool {
     buffer.len() >= 4 && buffer[..4] == SNAPPY_TAG
 }

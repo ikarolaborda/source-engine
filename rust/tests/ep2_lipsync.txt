@@ -1,0 +1,111 @@
+// Griggs speaking in the antlion-defense / Alyx-healing chamber, ep2_outland_02.
+// Run with audio enabled and snd_mute_losefocus 0; no desktop screenshots.
+Test_WaitForCheckPoint FinishedMapLoad once
+Test_Wait 5
+sv_cheats 1
+developer 2
+con_notifytime 0
+cl_drawhud 0
+r_drawviewmodel 0
+scene_print 1
+r_flex 1
+scene_clientflex 1
+cl_lipsync_validate_model male_06
+cl_lipsync_validate 1
+snd_validate 1
+snd_mute_losefocus 0
+// The map keeps these actors in templates until its arrival trigger fires.
+// Use the map's own setup relay to put the healing scene and defenders in place.
+ent_fire alyx_vort_scene_setup Trigger
+Test_Wait 3
+ent_fire logic_choreographed_scene Cancel
+noclip
+setpos_exact -2420 -9190 -716
+setang_exact 5 130 0
+Test_Wait 2
+getpos 2
+echo RUST_EP2_LIPSYNC_STARTED
+ent_fire turret_arena_vcd_1 Start
+Test_Wait 0.2
+jpeg rust_ep2_lip01 95
+Test_Wait 0.2
+jpeg rust_ep2_lip02 95
+Test_Wait 0.2
+jpeg rust_ep2_lip03 95
+Test_Wait 0.2
+jpeg rust_ep2_lip04 95
+Test_Wait 0.2
+jpeg rust_ep2_lip05 95
+Test_Wait 0.2
+jpeg rust_ep2_lip06 95
+Test_Wait 0.2
+jpeg rust_ep2_lip07 95
+Test_Wait 0.2
+jpeg rust_ep2_lip08 95
+Test_Wait 0.2
+jpeg rust_ep2_lip09 95
+Test_Wait 0.2
+jpeg rust_ep2_lip10 95
+Test_Wait 0.2
+jpeg rust_ep2_lip11 95
+Test_Wait 0.2
+jpeg rust_ep2_lip12 95
+Test_Wait 0.2
+jpeg rust_ep2_lip13 95
+Test_Wait 0.2
+jpeg rust_ep2_lip14 95
+Test_Wait 0.2
+jpeg rust_ep2_lip15 95
+Test_Wait 0.2
+jpeg rust_ep2_lip16 95
+Test_Wait 0.2
+jpeg rust_ep2_lip17 95
+Test_Wait 0.2
+jpeg rust_ep2_lip18 95
+Test_Wait 0.2
+jpeg rust_ep2_lip19 95
+Test_Wait 0.2
+jpeg rust_ep2_lip20 95
+Test_Wait 0.2
+jpeg rust_ep2_lip21 95
+Test_Wait 0.2
+jpeg rust_ep2_lip22 95
+Test_Wait 0.2
+jpeg rust_ep2_lip23 95
+Test_Wait 0.2
+jpeg rust_ep2_lip24 95
+Test_Wait 0.2
+jpeg rust_ep2_lip25 95
+Test_Wait 0.2
+jpeg rust_ep2_lip26 95
+Test_Wait 0.2
+jpeg rust_ep2_lip27 95
+Test_Wait 0.2
+jpeg rust_ep2_lip28 95
+Test_Wait 0.2
+jpeg rust_ep2_lip29 95
+Test_Wait 0.2
+jpeg rust_ep2_lip30 95
+Test_Wait 0.2
+jpeg rust_ep2_lip31 95
+Test_Wait 0.2
+jpeg rust_ep2_lip32 95
+Test_Wait 0.2
+jpeg rust_ep2_lip33 95
+Test_Wait 0.2
+jpeg rust_ep2_lip34 95
+Test_Wait 0.2
+jpeg rust_ep2_lip35 95
+Test_Wait 0.2
+jpeg rust_ep2_lip36 95
+Test_Wait 0.2
+jpeg rust_ep2_lip37 95
+Test_Wait 0.2
+jpeg rust_ep2_lip38 95
+Test_Wait 0.2
+jpeg rust_ep2_lip39 95
+Test_Wait 0.2
+jpeg rust_ep2_lip40 95
+Test_Wait 0.3
+echo RUST_EP2_LIPSYNC_COMPLETED
+quit

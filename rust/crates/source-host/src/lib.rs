@@ -1,5 +1,7 @@
 //! Deterministic host lifecycle and fixed-step scheduling foundations.
 
+pub mod app_system;
+
 use std::fmt;
 
 #[repr(u32)]

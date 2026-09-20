@@ -39,6 +39,28 @@ cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 Pass the installed Half-Life 2 root to `verify_abi.sh` to additionally exercise
 the C++ bridge against the shipped VPK payload and scene-image cache.
 
+Shared native ABI/layout changes require rebuilding every game consumer. For
+the eight targets with both client and server sources, build into one install
+(HL2 last leaves the normal development configuration selected), then audit it:
+
+```sh
+for game in hl2mp hl1 hl1mp portal cstrike dod episodic hl2; do
+  BUILD_DIR=build-rust-allgames INSTALL_DIR="$PWD/out-rust-allgames" \
+    bash scripts/build-macos-arm64-rust.sh --build-games="$game" || exit 1
+done
+python3 scripts/verify_rust_allgames_install.py out-rust-allgames \
+  --cargo-launcher build-rust-allgames/cargo-target/release/source-launcher
+python3 scripts/test_verify_rust_allgames_install.py
+```
+
+Keep each build's exit status/log: the read-only package audit checks ARM64
+images, hashes, game factory/lifecycle exports and provision of Rust imports,
+but cannot establish that pre-existing binaries were rebuilt from current
+source. It also cannot establish runtime compatibility without each game's
+content. TF is excluded because its client/server source set is incomplete.
+The macOS Rust CI job uses these eight targets as its build/audit matrix; the
+shared Metal device tests run only in the HL2 entry.
+
 After installing a `--rust-engine` Waf build, run a bounded live map smoke
 without copying the large asset corpus:
 
@@ -417,26 +439,214 @@ relative to its installed executable, and invokes `LauncherMain` as one
 transitional callback. The old C++ launcher executable is not built in this
 configuration.
 
+`CAppSystemGroup::Run` and the separate `Startup`/`Shutdown` API now delegate
+their startup/rollback sequence to `source-host::app_system`. Rust tracks completed
+connections and initializations, shuts those down in reverse order, runs the completed PreInit
+phase's cleanup, disconnects before unloading, and preserves Main's exit result.
+Native callbacks still execute each subsystem operation and module IO; failed
+callbacks must unwind their own partial work. Split startup returns a Rust-owned
+handle; shutdown requires the original thread and callback/data identity. Stale,
+duplicate and reentrant operations are rejected before callback dispatch, and no
+registry lock spans native callbacks. The ABI gate checks 1,088 startup/failure
+cases for each API, ownership guards and 1,000 reentrant split lifecycles.
+An installed-runtime failure-path gate is available:
+
+```sh
+RUST_GAME_SCENARIO=init-failure sh scripts/run_rust_game_smoke.sh \
+  out-rust-allgames hl2 d1_trainstation_01 90
+```
+
+It injects shader-device initialization failure after connection and requires
+both groups to clean up, with error exit 255 rather than a crash or a successful
+startup claim. Use `RUST_GAME_RENDERER=togl` for the retained native renderer.
+Add `RUST_GAME_SPLIT_STARTUP=1` to exercise separate startup/shutdown, including
+a second shutdown call that must not dispatch cleanup again. Without that flag,
+the launcher uses synchronous `Run` as before. The flag also works for the normal
+fixed-camera map-load/exit gate; neither gate establishes NPC speech correctness.
+
 The Cargo build is exposed to Waf with `--rust-engine`; its host context first
-mounts the five base-HL2 VPK layers ahead of loose content in `gameinfo.txt`
-order, then rebuilds that registry whenever the native filesystem changes its
-ordered loose/VPK search paths. Rebuilds retain cached validated VPK indexes,
+mounts the selected game's `gameinfo.txt` GAME paths, then rebuilds that
+registry whenever the native filesystem changes its ordered loose/VPK/ZIP/BSP
+search paths. Rebuilds retain cached validated archive indexes,
 preserve by-request-only visibility, and follow the trusted runtime content
-symlinks with native semantics. Legacy ZIP/BSP packs remain a checked native
-precedence guard. Rust performs bounded CRC-validating search-path reads and
+symlinks with native semantics. ZIP/BSP ranges are discovered, opened and
+validated by Rust, including stored and LZMA entries. Native code still owns
+mount registration and head/tail placement, consuming Rust-discovered numbered
+candidates and archive metadata in its search-path registry. The old
+legacy-pack precedence bypass is removed.
+The native `CZipPackFile` adapter now also delegates directory/local-header
+validation, canonical filename lookup, entry offsets/sizes and index lifetime
+to a metadata-only Rust `source-pak::Index`. The native hash table and central
+directory parser are excluded from Rust builds. An opaque handle owns names and
+metadata after the borrowed input buffer is released. The optional native
+preload cache is bypassed in favor of archive payload bytes, and its reserved
+`__preload_section.pre` entry is hidden from this index. Absolute/filtered pack
+opens now use Rust payload reads too, and pack wildcard matching now runs in
+Rust. This does not retire the entire pack adapter.
+`source-filesystem::pack_archive::Archive` owns the validated metadata and
+payload source. File-backed archives retain the descriptor but release temporary
+ZIP bytes. `source_context_read_path_add_pak_index` shares that owner with
+ordinary search mounts, without path lookup, reopening, reparsing, or retaining
+a second compressed-byte copy. Both ordinary and explicit pack reads therefore
+use the same original descriptor after pathname replacement. New remounts see
+the replacement; in-place corruption/truncation fails CRC/IO checks rather than
+falling through to a lower-priority file. This is not an atomic file snapshot.
+Index handles, mounts in multiple contexts, and decoded file cursors have
+independent lifetimes. The last archive reference closes the descriptor;
+decoded files remain usable without retaining it.
+
+Read-path selection now shares `source-filesystem::selection::path_id_matches`
+between all Rust mount queries and the remaining native search iterator. No
+requested ID excludes by-request-only mounts; an explicit ID bypasses that
+flag and matches ASCII-case-insensitively. `BSP` is reserved for GAME map packs,
+not loose directories, VPKs, standalone ZIPs or a literal BSP-ID mount. Typed
+archive provenance is retained instead of inferred from a filename or offset.
+Legacy untyped byte-range mounts do not qualify; the in-memory map-pak API does.
+The context-free `source_read_path_matches` ABI distinguishes an absent request
+from an explicit empty one and fails closed on invalid flags/slices. Existing
+context read/find APIs retain their empty-slice-means-unspecified contract.
+Native registration/reuse decisions and trust checks remain; table mutation
+and resource lifetime ownership are described below.
+
+`source-filesystem::search_plan` owns the remaining iterator's selected order,
+position and store-ID deduplication. The context-independent plan ABI consumes
+borrowed mount descriptors and retains only source indices. Filtering by
+path/type/platform exclusion happens before visiting an opaque signed store
+ID, allowing an eligible alias to win after an earlier alias was rejected.
+VPK remains non-pack for the native `FILTER_CULLPACK` contract; only ZIP/BSP
+count as pack paths there. Plans freeze selection metadata for one traversal;
+the C++ GetFirst adapter builds a fresh plan, while the ABI reset replays the
+same immutable plan. Native resource references remain in the iterator's
+existing snapshot; returned Rust indices select those references. Empty and
+absolute pseudo-path handling stays native.
+
+The fallback native find adapter also uses Rust-owned store visits, replacing
+its C++ visited-ID vector. Opaque handles own either a plan or a visit set;
+wrong-kind/stale handles fail, concurrent calls serialize, and C++ destructors
+release the handles. No active engine context is needed during startup/unload.
+The plan ABI limits snapshots to 65,536 entries and UTF-8 IDs to 4,096 bytes.
+Xbox exclusion-name lookup supplies an input flag from native code; its ordering
+is unit/ABI/fuzz tested, not Xbox-runtime validated. Native registration policy
+and public resource/file/find adapters still remain.
+
+The ordered mount table and resource-lease lifetime now belong to Rust too.
+Both the live native filesystem table and its iterator snapshots use
+`source-filesystem::mount_table`, not a C++ ordered vector. A thin facade maps
+legacy index access to opaque table handles. Temporary CSearchPath objects are
+opaque host contexts, with explicit clone/drop callbacks: insertion transfers
+ownership only on success; ordered removal, swap removal, clear and destruction
+release resources in Rust-controlled lifetimes. Snapshot callbacks copy headers
+and AddRef existing pack/VPK resources, preserving the previous copy semantics.
+Source leases remain pinned during callbacks, including reentrant source-table
+destruction. A failed clone drops earlier copies without publishing a partial
+snapshot. Callbacks run outside both handle-table and per-table locks.
+
+Callback code/data must outlive all owning tables and must support the calling
+thread without unwinding. Borrowed entry pointers require caller serialization
+against removal; this is not an unrestricted concurrent native-pointer API.
+Registry snapshots are bounded to 65,536 mounts. The monotonic positive store-ID
+allocator is now Rust-owned and fails at exhaustion rather than wrapping.
+Native physical-path alias matching, duplicate registration/repositioning rules,
+map CRC identities, path-ID metadata, archive reuse and trust still remain.
+Those metadata/policy decisions are the next boundary; the table's opaque
+native-resource callbacks are transitional, not full adapter retirement.
+
+The explicit-range `source_pak_index_open_file` and ordinary range-mount Rust
+ABI remain available for compatibility, using the same archive implementation.
+The native adapter no longer calls a range-mount bridge or stores the archive
+length/base offset in Rust builds. Three unused private C++ bridges for raw
+index creation, range opening and range mounting were removed. The public Rust
+ABI constructors remain; slice-created indexes are metadata-only and cannot be
+mounted or open payloads. The Rust memory-pack API still owns its supplied ZIP
+bytes. All pack modes hide the reserved preload-cache entry from content reads,
+metadata queries and enumeration. Empty in-bounds ranges represent empty packs.
+
+The native mount adapter now uses `source_pak_index_open_archive`, specifying
+standalone ZIP or embedded BSP ZIP rather than a byte range. Rust reads the
+fixed BSP header (versions 19..21), rejects negative/out-of-file/header-overlap
+ranges and outer-compressed pack lumps, and treats an empty BSP lump as absent.
+The same descriptor supplies the range, timestamp, index and payload reads.
+Other BSP lumps are not validated by this mount operation; full `Bsp::parse`
+still validates all ranges through the shared header parser. Native header
+reads, ZIP length seeks and mount-open handles are excluded from Rust builds.
+Numbered ZIP discovery now uses `source_context_find_pack_candidates`: Rust
+snapshots full candidate paths, higher numbers first, with optional Xbox360
+localized series ahead of the base series. A failed metadata lookup terminates
+that series, matching the old stat policy; a present malformed archive does not
+hide later candidates. Symlinks are followed, directories remain candidates
+until archive validation, and paths are not truncated. Discovery retains names,
+not file descriptors, so the snapshot does not promise atomic file contents.
+The context find-next/close APIs own its lifetime; short output does not publish
+or advance a cursor. Invalid paths/languages and more than 65,536 archives per
+series fail without a partial mount. Xbox naming is covered by pure/ABI tests,
+not Xbox runtime validation. Mount registration/reuse, path-ID trust, and the
+head/tail placement of loose directories remain native.
+The loaded native filesystem gate also exercises 200 BSP replacement/remount
+cycles, nested BeginMapAccess/EndMapAccess, refreshed GAME/BSP lookup and glob
+results, and old-map decoded file handles surviving replacement and unmount.
+These are filesystem lifetime checks, not live campaign-transition coverage.
+
+`source_context_find_first_pak` snapshots index matches into a context-owned
+cursor, using the ordinary Rust filesystem's ASCII-case-insensitive bytewise
+glob matcher (`*`, `?`, Win32-style `*.*`). It returns canonical relative names,
+sorted files before sorted implied directories, without duplicates; files win
+same-name directory collisions. Archive-local dot/slash normalization is allowed
+but root escape, absolute paths, wildcard directories and empty basenames fail.
+Short buffers do not consume results, and a cursor survives index destruction.
+The fallback pack adapter drains these results into its existing FindData
+lists; public native list iteration remains, not a second matcher.
+Unlike the old pack-only matcher, root files, partial wildcards and multi-dot
+names work consistently with ordinary Rust finds. Relative ZIP finds now also
+match directory prefixes case-insensitively and hide the preload-cache entry.
+The Rust ABI exposes full validated names up to 1024 bytes; the native adapter
+omits basenames that cannot fit its legacy MAX_PATH field instead of truncating.
+Ordinary BSP-only queries now use selected Rust map mounts and the same
+archive-local normalization. `source_context_find_first_bounded` filters long
+names before publishing a cursor; its query limit is independent of output
+capacity, so short buffers still do not truncate or consume results. Native
+BSP queries keep the legacy MAX_PATH limit even where POSIX FindData is wider.
+The original unbounded find ABI is unchanged. BSP text opens retain the native
+CRLF-aware pack adapter; their payload and cursor still belong to Rust.
+
+`source_context_file_open_pak` shares the bounded stored/LZMA decoder with
+ordinary relative reads, with a 64 MiB dictionary and 256 MiB decoded-entry
+limit. Seeks clamp to [0,size], including negative seeks (fixing the native
+stored reader's unsigned wrap to EOF); invalid origins leave the cursor alone.
+Opened payloads survive index destruction/unmount. A thin `CPackFileHandle`
+adapter preserves native text-mode CRLF handling without owning a cursor or
+decoding bytes. `CZipPackFileHandle`, `CLZMAZipPackFileHandle` and `ReadFromPack`
+are excluded from Rust builds. Full payload materialization on open can use
+more memory than the former native streaming decoder; campaign-scale memory
+and latency remain unmeasured.
+
+The public ABI metadata differential also checks payload offsets against Python
+(including distinct local/central extra fields), 10,000 index lifecycles, stale
+handles, short buffers and concurrent queries. To exercise the actual installed
+filesystem module without game content, including stored/LZMA ZIP and BSP
+absolute reads, seeks, BSP enumeration and module cleanup:
+
+```sh
+sh rust/verify_native_pak.sh out-rust-allgames
+```
+
+This macOS gate builds the native LZMA SDK only as a fixture oracle and is wired
+into the HL2 CI matrix entry. It links the bridge's ABI instance so its context
+and the filesystem share one handle registry.
+Rust performs bounded CRC-validating search-path reads and
 validates its scene-image cache during startup. Ordinary relative opens across
 the synchronized path IDs now return context-owned opaque Rust handles. Loose
-files remain streaming disk handles; VPK entries become CRC-validated memory
+files remain streaming disk handles; VPK/ZIP/BSP entries become CRC-validated memory
 cursors. Read, seek, tell, size, open-state, and close remain behind the existing
 pointer-shaped `IFileSystem` adapter, with legacy fallback for unmounted content
-and pure-server/special-pack paths. Positive relative `FileExists` and
+and absolute/pure-server/pack-filtered paths. Corrupt recognized relative entries
+do not fall back to native reads. Positive relative `FileExists` and
 filename-size queries use the same Rust registry without opening or copying the
 asset. Relative `IsDirectory` queries cover both canonical loose directories
-and binary-searched virtual VPK directory prefixes. Relative
+and virtual VPK/ZIP/BSP directory prefixes. Relative
 `FindFirst`/`FindNext`/`FindClose` calls use context-owned Rust wildcard cursors
 that preserve mount precedence, filter by path ID, suppress duplicate names,
-and synthesize immediate VPK directories. Absolute and explicit BSP-pack
-enumeration retain their native fallback. For a relative write, Rust
+and synthesize immediate archive directories. Absolute enumeration retains its
+native fallback; BSP selection is shared with Rust. For a relative write, Rust
 maintains a separate ordered registry synchronized from
 the native loose-directory search paths and selects `GAME_WRITE`, `MOD_WRITE`,
 the requested path ID, `DEFAULT_WRITE_PATH`, or the first directory using the
@@ -472,8 +682,15 @@ duplicate/order/drop state. Rust emits and finalizes the outgoing
 sequence/ack/flags/reliable/choke/challenge header, supplies the folded packet
 CRC when checksums are enabled, and parses the same incoming fields through a
 bounded validator before the retained native fragment logic runs. The native
-adapter still owns payload assembly, compression/splitting, reliable fragments,
-and message dispatch. Networked string tables
+adapter still owns payload assembly, split-datagram transport, reliable fragments,
+and message dispatch. Generic engine-buffer compression/decompression now uses
+Rust's LZSS and Source-tagged Snappy codecs, with no native error fallback.
+Snappy compatibility is cross-decoding, not byte-identical compressed output;
+the ABI gate tests both directions against the retained native oracle. Tagged
+malformed streams fail instead of being copied as raw data. Rust builds omit
+the native Snappy translation units from tier1. The UDP and reliable-fragment
+receive paths now honor decompression failure before parsing output.
+Networked string tables
 use Rust-owned canonical strings, case-insensitive indices, bounded user data,
 change ticks, and rollback history, while native dictionaries remain
 pointer-stable mirrors and retain callbacks. Rust also encodes those entries

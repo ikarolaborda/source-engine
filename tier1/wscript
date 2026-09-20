@@ -41,9 +41,6 @@ def build(bld):
 		'newbitbuf.cpp',
 		'rangecheckedvar.cpp',
 		'reliabletimer.cpp',
-		'snappy-sinksource.cpp',
-		'snappy-stubs-internal.cpp',
-		'snappy.cpp',
 		'sparsematrix.cpp',
 		'splitstring.cpp',
 		'stringpool.cpp',
@@ -58,6 +55,11 @@ def build(bld):
 		'utlstring.cpp',
 		'utlsymbol.cpp'
 	]
+
+	# Generic engine buffers use the Rust codec in this configuration. Keep
+	# native Snappy only for non-Rust builds and the standalone differential.
+	if not bld.env.RUST_ENGINE:
+		source += ['snappy-sinksource.cpp', 'snappy-stubs-internal.cpp', 'snappy.cpp']
 
 	if bld.env.DEST_OS == 'win32':
 		source += [
@@ -98,4 +100,3 @@ def build(bld):
 		subsystem = bld.env.MSVC_SUBSYSTEM,
 		idx      = bld.get_taskgen_count()
 	)
-

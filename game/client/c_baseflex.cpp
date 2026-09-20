@@ -32,7 +32,9 @@ ConVar g_CV_FlexRules("flex_rules", "1", 0, "Allow flex animation rules to run."
 ConVar g_CV_BlinkDuration("blink_duration", "0.2", 0, "How many seconds an eye blink will last." );
 ConVar g_CV_FlexSmooth("flex_smooth", "1", 0, "Applies smoothing/decay curve to flex animation controller changes." );
 ConVar cl_lipsync_validate("cl_lipsync_validate", "0", FCVAR_CHEAT,
-	"Emit one-shot validation markers while G-Man phonemes are converted into rendered flex weights." );
+	"Emit validation markers while phonemes are converted into rendered flex weights." );
+ConVar cl_lipsync_validate_model("cl_lipsync_validate_model", "gman", FCVAR_CHEAT,
+	"Model-name substring to sample for lip-sync validation (one visible actor per run)." );
 
 static bool s_bReportedGManPhonemes = false;
 static bool s_bReportedGManViseme = false;
@@ -55,7 +57,8 @@ static bool IsGManLipSyncValidationTarget( C_BaseFlex *pFlex )
 		return false;
 
 	const char *pModelName = modelinfo->GetModelName( pFlex->GetModel() );
-	return pModelName && V_stristr( pModelName, "gman" );
+	const char *pModelFilter = cl_lipsync_validate_model.GetString();
+	return pModelName && pModelFilter[0] && V_stristr( pModelName, pModelFilter );
 }
 
 #if defined( CBaseFlex )

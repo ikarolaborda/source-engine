@@ -37,6 +37,17 @@
 
 extern IMaterialSystem *materials;
 
+// Metal presents an independently sized back buffer. SDL desktop bounds on
+// macOS are window points, not a limit on render pixels (especially on Retina).
+static bool UsesMetalRenderSizes()
+{
+#if defined( SOURCE_RUST_ENGINE ) && defined( OSX )
+	return CommandLine()->FindParm( "-metal" ) != 0;
+#else
+	return false;
+#endif
+}
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1234,7 +1245,8 @@ void COptionsSubVideo::PrepareResolutionList()
 		if ( bWindowed )
 #endif
 		{
-			if ( plist->width > desktopWidth || plist->height > desktopHeight )
+			if ( !UsesMetalRenderSizes() &&
+				( plist->width > desktopWidth || plist->height > desktopHeight ) )
 			{
 				// Filter out sizes larger than our desktop.
 				continue;
@@ -1564,7 +1576,7 @@ void COptionsSubVideo::OnApplyChanges()
 			}
 		}
 
-		if ( !SDL_GetDisplayBounds( displayIndexTarget, &rect ) )
+		if ( !UsesMetalRenderSizes() && !SDL_GetDisplayBounds( displayIndexTarget, &rect ) )
 		{
 			// If we are going non-native fullscreen, tweak the resolution to have the same aspect ratio as the display.
 			if ( ( width != rect.w ) || ( height != rect.h ) )

@@ -63,7 +63,7 @@ for SOURCE_PATH in "$CONTENT_ROOT/hl2"/*
 do
 	NAME=$(basename "$SOURCE_PATH")
 	case "$NAME" in
-		bin|cfg|save|screenshots|downloadlists|testscripts|console.log|demoheader.tmp|gamestate.txt|stats.txt|videoconfig_mac.cfg|voice_ban.dt)
+		bin|cfg|save|screenshots|downloadlists|testscripts|console.log|demoheader.tmp|gamestate.txt|stats.txt|videoconfig_mac.cfg|voice_ban.dt|glshaders.cfg|*.sound.cache)
 			continue
 			;;
 	esac
@@ -99,8 +99,9 @@ do
 done
 
 if [ ! -e "$RUNTIME_ROOT/platform" ] && [ ! -L "$RUNTIME_ROOT/platform" ]; then
-	ln -s "$CONTENT_ROOT/platform" "$RUNTIME_ROOT/platform"
+	cp -RL "$CONTENT_ROOT/platform" "$RUNTIME_ROOT/platform"
 fi
+sh "$SCRIPT_ROOT/scripts/prepare_rust_runtime_writes.sh" "$RUNTIME_ROOT" hl2
 if [ ! -e "$RUNTIME_ROOT/steam_appid.txt" ] && [ -f "$CONTENT_ROOT/steam_appid.txt" ]; then
 	cp "$CONTENT_ROOT/steam_appid.txt" "$RUNTIME_ROOT/steam_appid.txt"
 fi
@@ -308,10 +309,11 @@ for EXPECTED in \
 	"RUST_COMMAND_QUEUE_ACTIVE" \
 	"Rust host phase: launcher ready" \
 	"Rust executable base:" \
-	"Rust GAME search mounts: 5 VPKs before loose content" \
-	"Rust VPK read: CRC-validated" \
+	"Rust GAME search mounts: [1-9][0-9]* from hl2/gameinfo.txt" \
+	"Rust startup content read: [1-9][0-9]* bytes from cfg/valve.rc" \
 	"Rust filesystem read paths synchronized:" \
-	"Rust filesystem legacy pack precedence guard synchronized:" \
+	"Rust filesystem ZIP/BSP mounts active:" \
+	"Rust filesystem ZIP/BSP read active:" \
 	"Rust filesystem metadata active:" \
 	"Rust filesystem path resolution active:" \
 	"Rust filesystem wildcard search active:" \

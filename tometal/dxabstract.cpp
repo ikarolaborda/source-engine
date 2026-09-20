@@ -595,8 +595,8 @@ static CUtlVector<D3DDISPLAYMODE> &DisplayModes()
 	mode.Format = D3DFMT_X8R8G8B8;
 	for ( size_t i = 0; i < ARRAYSIZE( s_Sizes ); ++i )
 	{
-		if ( s_Sizes[i][0] > info.pixel_width || s_Sizes[i][1] > info.pixel_height )
-			continue;
+		// These are offscreen render sizes, not physical display modes. Metal
+		// scales the back buffer to the drawable, including supersampled 4K.
 		mode.Width = s_Sizes[i][0];
 		mode.Height = s_Sizes[i][1];
 		s_Modes.AddToTail( mode );

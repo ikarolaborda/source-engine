@@ -42,8 +42,11 @@
 #endif
 #include "tier3/tier3.h"
 #include <vgui/ILocalize.h>
+#if !defined( SOURCE_RUST_ENGINE )
 #include "tier1/lzss.h"
 #include "tier1/snappy.h"
+#endif
+#include <limits.h>
 
 #if defined( SOURCE_RUST_ENGINE )
 #include "../appframework/rust_engine_bridge.h"
@@ -1227,8 +1230,15 @@ bool COM_IsValidLogFilename( const char *pszFilename )
 //-----------------------------------------------------------------------------
 unsigned int COM_GetIdealDestinationCompressionBufferSize_Snappy( unsigned int uncompressedSize )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	uint64_t size = 0;
+	if ( source_rust_bridge_snappy_max_size( uncompressedSize, &size ) != SOURCE_ABI_OK || size > UINT_MAX )
+		return 0;
+	return static_cast<unsigned int>( size );
+#else
 	// 4 for the ID, plus whatever Snappy says it would need.
 	return 4 + snappy::MaxCompressedLength( uncompressedSize );
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1236,6 +1246,25 @@ void *COM_CompressBuffer_Snappy( const void *source, unsigned int sourceLen, uns
 {
 	Assert( source );
 	Assert( compressedLen );
+
+#if defined( SOURCE_RUST_ENGINE )
+	const unsigned int capacity = COM_GetIdealDestinationCompressionBufferSize_Snappy( sourceLen );
+	if ( !capacity || !compressedLen )
+		return NULL;
+	void *output = malloc( capacity );
+	if ( !output )
+		return NULL;
+	uint64_t length = 0;
+	const SourceAbiStatus status = source_rust_bridge_snappy_compress( source, sourceLen,
+		output, capacity, &length );
+	if ( status != SOURCE_ABI_OK || ( maxCompressedLen && length > maxCompressedLen ) )
+	{
+		free( output );
+		return NULL;
+	}
+	*compressedLen = static_cast<unsigned int>( length );
+	return output;
+#else
 
 	// Allocate a buffer big enough to hold the worst case.
 	unsigned nMaxCompressedSize = COM_GetIdealDestinationCompressionBufferSize_Snappy( sourceLen );
@@ -1259,6 +1288,7 @@ void *COM_CompressBuffer_Snappy( const void *source, unsigned int sourceLen, uns
 
 	*compressedLen = compressed_length;
 	return pCompressed;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1267,6 +1297,16 @@ bool COM_BufferToBufferCompress_Snappy( void *dest, unsigned int *destLen, const
 	Assert( dest );
 	Assert( destLen );
 	Assert( source );
+
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !destLen )
+		return false;
+	uint64_t length = 0;
+	if ( source_rust_bridge_snappy_compress( source, sourceLen, dest, *destLen, &length ) != SOURCE_ABI_OK )
+		return false;
+	*destLen = static_cast<unsigned int>( length );
+	return true;
+#else
 
 	// Check if we need to use a temporary buffer
 	unsigned nMaxCompressedSize = COM_GetIdealDestinationCompressionBufferSize_Snappy( sourceLen );
@@ -1294,6 +1334,7 @@ bool COM_BufferToBufferCompress_Snappy( void *dest, unsigned int *destLen, const
 	Assert( compressed_length <= nMaxCompressedSize );
 	*destLen = compressed_length;
 	return true;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1311,6 +1352,23 @@ void *COM_CompressBuffer_LZSS( const void *source, unsigned int sourceLen, unsig
 	Assert( source );
 	Assert( compressedLen );
 
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !compressedLen || !sourceLen )
+		return NULL;
+	void *output = malloc( sourceLen );
+	if ( !output )
+		return NULL;
+	uint64_t length = 0;
+	const SourceAbiStatus status = source_rust_bridge_lzss_compress( source, sourceLen,
+		SOURCE_ABI_LZSS_DEFAULT_WINDOW, output, sourceLen, &length );
+	if ( status != SOURCE_ABI_OK || ( maxCompressedLen && length > maxCompressedLen ) )
+	{
+		free( output );
+		return NULL;
+	}
+	*compressedLen = static_cast<unsigned int>( length );
+	return output;
+#else
 	CLZSS s;
 	unsigned int uCompressedLen = 0;
 	byte *pbOut = s.Compress( (const byte *)source, sourceLen, &uCompressedLen );
@@ -1325,6 +1383,7 @@ void *COM_CompressBuffer_LZSS( const void *source, unsigned int sourceLen, unsig
 		free( pbOut );
 	}
 	return NULL;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1335,27 +1394,16 @@ bool COM_BufferToBufferCompress_LZSS( void *dest, unsigned int *destLen, const v
 	Assert( source );
 
 #if defined( SOURCE_RUST_ENGINE )
-	// Rust owns the codec. Its output is byte-identical to the native
-	// encoder's, including which input it declines as not worth compressing,
-	// so a buffer written here reads back the same either way; the LZSS
-	// differential gate is what holds that true. The native encoder never
-	// writes more than the input it was given, and Rust matches it byte for
-	// byte, so the caller's buffer is as adequate for one as the other.
-	{
-		uint64_t nCompressedLength = 0;
-		const SourceAbiStatus status = source_rust_bridge_lzss_compress( source, sourceLen,
-			SOURCE_ABI_LZSS_DEFAULT_WINDOW, dest, sourceLen, &nCompressedLength );
-		if ( status == SOURCE_ABI_OK )
-		{
-			*destLen = (unsigned int)nCompressedLength;
-			return true;
-		}
-		// Declining means compression would not have helped, which is the
-		// same answer the native encoder gives by returning null.
-		if ( status == SOURCE_ABI_DECLINED )
-			return false;
-	}
-#endif
+	// No native fallback: a Rust failure must not bypass checked bounds.
+	if ( !destLen )
+		return false;
+	uint64_t length = 0;
+	if ( source_rust_bridge_lzss_compress( source, sourceLen,
+		SOURCE_ABI_LZSS_DEFAULT_WINDOW, dest, *destLen, &length ) != SOURCE_ABI_OK )
+		return false;
+	*destLen = static_cast<unsigned int>( length );
+	return true;
+#else
 
 	CLZSS s;
 	unsigned int uCompressedLen = 0;
@@ -1364,11 +1412,18 @@ bool COM_BufferToBufferCompress_LZSS( void *dest, unsigned int *destLen, const v
 
 	*destLen = uCompressedLen;
 	return true;
+#endif
 }
 
 //-----------------------------------------------------------------------------
 int COM_GetUncompressedSize( const void *compressed, unsigned int compressedLen )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	uint64_t size = 0;
+	if ( source_rust_bridge_buffer_actual_size( compressed, compressedLen, &size ) != SOURCE_ABI_OK || size > INT_MAX )
+		return -1;
+	return static_cast<int>( size );
+#else
 	const lzss_header_t *pHeader = (const lzss_header_t *)compressed;
 
 	// Check for our own LZSS compressed data
@@ -1384,6 +1439,7 @@ int COM_GetUncompressedSize( const void *compressed, unsigned int compressedLen 
 	}
 
 	return -1;
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -1391,6 +1447,20 @@ int COM_GetUncompressedSize( const void *compressed, unsigned int compressedLen 
 //-----------------------------------------------------------------------------
 bool COM_BufferToBufferDecompress( void *dest, unsigned int *destLen, const void *source, unsigned int sourceLen )
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !destLen )
+		return false;
+	uint64_t length = 0;
+	const SourceAbiStatus status = source_rust_bridge_buffer_decompress( source, sourceLen,
+		dest, *destLen, &length );
+	if ( status != SOURCE_ABI_OK )
+	{
+		Warning( "NET_BufferToBufferDecompress: Rust codec rejected buffer (status %d)\n", status );
+		return false;
+	}
+	*destLen = static_cast<unsigned int>( length );
+	return true;
+#else
 	int nDecompressedSize = COM_GetUncompressedSize( source, sourceLen );
 	if ( nDecompressedSize >= 0 )
 	{
@@ -1405,29 +1475,6 @@ bool COM_BufferToBufferDecompress( void *dest, unsigned int *destLen, const void
 		const lzss_header_t *pHeader = (const lzss_header_t *)source;
 		if ( pHeader->id == LZSS_ID )
 		{
-#if defined( SOURCE_RUST_ENGINE )
-			// Rust checks every back-reference against what it has actually
-			// decoded, so a corrupt stream is refused rather than read out of
-			// bounds.
-			uint64_t nRustDecompressed = 0;
-			const SourceAbiStatus status = source_rust_bridge_lzss_decompress( source,
-				sourceLen, dest, *destLen, &nRustDecompressed );
-			if ( status == SOURCE_ABI_OK )
-			{
-				if ( (int)nRustDecompressed != nDecompressedSize )
-				{
-					Warning( "NET_BufferToBufferDecompress: header said %d bytes would be decompressed, but we LZSS decompressed %d\n", nDecompressedSize, (int)nRustDecompressed );
-					return false;
-				}
-				*destLen = nDecompressedSize;
-				return true;
-			}
-			if ( status == SOURCE_ABI_FORMAT_ERROR )
-			{
-				Warning( "NET_BufferToBufferDecompress: the LZSS stream did not decode\n" );
-				return false;
-			}
-#endif
 			CLZSS s;
 			int nActualDecompressedSize = s.SafeUncompress( (byte *)source, sourceLen, (byte *)dest, *destLen );
 			if ( nActualDecompressedSize != nDecompressedSize )
@@ -1467,4 +1514,5 @@ bool COM_BufferToBufferDecompress( void *dest, unsigned int *destLen, const void
 	}
 
 	return true;
+#endif
 }

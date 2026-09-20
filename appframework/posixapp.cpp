@@ -162,15 +162,25 @@ int CSteamApplication::Main( )
 int CSteamApplication::Startup()
 {
 	int nRetVal = BaseClass::Startup();
-	if ( GetErrorStage() != NONE )
+	if ( nRetVal != INIT_OK || GetErrorStage() != NONE )
 		return nRetVal;
 	
 	if ( FileSystem_SetBasePaths( m_pFileSystem ) != FS_OK )
+	{
+#if defined( SOURCE_RUST_ENGINE )
+		BaseClass::Shutdown();
+#endif
 		return 0;
+	}
 	
 	// Now that Steam is loaded, we can load up main libraries through steam
 	m_pChildAppSystemGroup->Setup( m_pFileSystem, this );
-	return m_pChildAppSystemGroup->Startup();
+	nRetVal = m_pChildAppSystemGroup->Startup();
+#if defined( SOURCE_RUST_ENGINE )
+	if ( nRetVal != INIT_OK )
+		BaseClass::Shutdown();
+#endif
+	return nRetVal;
 }
 
 
@@ -182,4 +192,3 @@ void CSteamApplication::Shutdown()
 
 // Turn off memdbg macros (turned on up top) since this is included like a header
 #include "tier0/memdbgoff.h"
-

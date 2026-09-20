@@ -791,7 +791,11 @@ InitReturnVal_t CMaterialSystem::Init()
 	g_pShaderDeviceMgr->SetAdapter( m_nAdapter, m_nAdapterFlags );
 	if ( g_pShaderDeviceMgr->Init( ) != INIT_OK )
 	{
-		DestroyShaderAPI();
+		// Base Init registered this module's convars. Unwind that completed
+		// part, but keep the connected shader module alive until Disconnect:
+		// it still owns registered convars and interface pointers. Unloading
+		// it here leaves the global command list pointing into unmapped memory.
+		BaseClass::Shutdown();
 		return INIT_FAILED;
 	}
 

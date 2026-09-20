@@ -1571,8 +1571,8 @@ bool NET_ReceiveDatagram ( const int sock, netpacket_t * packet )
 				memDecompressed.EnsureCapacity( actualSize );
 
 				unsigned uDecompressedSize = (unsigned)actualSize;
-				COM_BufferToBufferDecompress( (char*)memDecompressed.Base(), &uDecompressedSize, pCompressedData, nCompressedDataSize );
-				if ( uDecompressedSize == 0 || ((unsigned int)actualSize) != uDecompressedSize )
+				if ( !COM_BufferToBufferDecompress( (char*)memDecompressed.Base(), &uDecompressedSize, pCompressedData, nCompressedDataSize ) ||
+					uDecompressedSize == 0 || ((unsigned int)actualSize) != uDecompressedSize )
 				{
 					if ( net_showudp.GetBool() )
 					{

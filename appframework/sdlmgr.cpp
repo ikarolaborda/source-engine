@@ -884,22 +884,28 @@ bool CSDLMgr::CreateHiddenGameWindow( const char *pTitle, int width, int height 
 
 #ifdef OSX
 
-	GLMRendererInfoFields rendererInfo;
-	GetDisplayDB()->GetRendererInfo( 0, &rendererInfo );
-	//-----------------------------------------------------------------------------------------
-	//- enforce minimum system requirements for multiplayer branch (CSS / DOD / TF2) : no GMA950, X3100, or NV G7x.
-	if (!CommandLine()->FindParm("-glmnosystemcheck"))	// escape hatch
+	// Metal validates its own device. A failed legacy CGL metadata query is
+	// not an OS-version result; only consume metadata from successful queries.
+#if defined( SOURCE_RUST_ENGINE )
+	if ( !m_bMetal )
+#endif
 	{
-		if ( rendererInfo.m_osComboVersion < 0x0A0607 )
+		GLMRendererInfoFields rendererInfo = {};
+		const bool rendererInfoUnavailable = GetDisplayDB()->GetRendererInfo( 0, &rendererInfo );
+		// Enforce historical requirements only when the display query provides
+		// metadata. Device/context creation handles an unavailable query.
+		if ( !rendererInfoUnavailable && !CommandLine()->FindParm("-glmnosystemcheck") )
 		{
-			Error( "This game requires OS X version 10.6.7 or higher" );
-			exit(1);
-		}
-		// forbidden chipsets
-		if ( rendererInfo.m_atiR5xx || rendererInfo.m_intel95x || rendererInfo.m_intel3100 || rendererInfo.m_nvG7x )
-		{
-			Error( "This game does not support this type of graphics processor" );
-			exit(1);
+			if ( rendererInfo.m_osComboVersion < 0x0A0607 )
+			{
+				Error( "This game requires OS X version 10.6.7 or higher" );
+				exit(1);
+			}
+			if ( rendererInfo.m_atiR5xx || rendererInfo.m_intel95x || rendererInfo.m_intel3100 || rendererInfo.m_nvG7x )
+			{
+				Error( "This game does not support this type of graphics processor" );
+				exit(1);
+			}
 		}
 	}
 #endif
@@ -2487,12 +2493,12 @@ GLMDisplayDB *CSDLMgr::GetDisplayDB( void )
 #if defined( OSX )
 		// side effect: we fill in m_force_vsync..
 		{
-			GLMRendererInfoFields	info;
-			m_displayDB->GetRendererInfo( 0, &info );
+			GLMRendererInfoFields info = {};
+			const bool infoUnavailable = m_displayDB->GetRendererInfo( 0, &info );
 
 			// m_leopard = (info.m_osComboVersion < 0x000A0600);
 
-			m_force_vsync = info.m_badDriver1064NV;		// just force it if it's the bum NV driver
+			m_force_vsync = !infoUnavailable && info.m_badDriver1064NV;
 		}
 #endif
 	}

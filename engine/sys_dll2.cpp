@@ -926,6 +926,7 @@ class CEngineAPI : public CTier3AppSystem< IEngineAPI >
 	typedef CTier3AppSystem< IEngineAPI > BaseClass;
 
 public:
+	CEngineAPI() : m_bStartupFileSystem( false ) {}
 	virtual bool Connect( CreateInterfaceFn factory );
 	virtual void Disconnect();
 	virtual void *QueryInterface( const char *pInterfaceName );
@@ -975,6 +976,7 @@ private:
 	// FIXME: This should move into the launcher!
 	bool OnStartup( void *pInstance, const char *pStartupModName );
 	void OnShutdown();
+	void ShutdownStartupFileSystem();
 
 	// Initialization, shutdown of a mod.
 	bool ModInit( const char *pModName, const char *pGameDir );
@@ -1004,6 +1006,7 @@ private:
 	void *m_hEditorHWnd;
 	bool m_bRunningSimulation;
 	bool m_bSupportsVR;
+	bool m_bStartupFileSystem;
 	StartupInfo_t m_StartupInfo;
 };
 
@@ -1063,6 +1066,9 @@ bool CEngineAPI::Connect( CreateInterfaceFn factory )
 void CEngineAPI::Disconnect() 
 {
 	DisconnectMDLCacheNotify();
+	// SetStartupInfo runs in the group's PreInit, before this system's Init.
+	// A different system can fail first, so Main/OnShutdown may never run.
+	ShutdownStartupFileSystem();
 
 #if !defined( SWDS )
 	TRACESHUTDOWN( Steam3Client().Shutdown() );
@@ -1116,6 +1122,7 @@ void CEngineAPI::SetStartupInfo( StartupInfo_t &info )
 
 	// Needs to be done prior to init material system config
 	TRACEINIT( COM_InitFilesystem( m_StartupInfo.m_pInitialMod ), COM_ShutdownFileSystem() );
+	m_bStartupFileSystem = true;
 
 	if ( steamInfo != eSteamInfo_Initialized )
 	{
@@ -1724,7 +1731,16 @@ void CEngineAPI::OnShutdown()
 	game->Shutdown();
 
 	materials->ModShutdown();
-	TRACESHUTDOWN( COM_ShutdownFileSystem() );
+	ShutdownStartupFileSystem();
+}
+
+void CEngineAPI::ShutdownStartupFileSystem()
+{
+	if ( m_bStartupFileSystem )
+	{
+		TRACESHUTDOWN( COM_ShutdownFileSystem() );
+		m_bStartupFileSystem = false;
+	}
 }
 
 static bool IsValveMod( const char *pModName )

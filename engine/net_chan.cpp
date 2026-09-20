@@ -270,25 +270,29 @@ void CNetChan::CompressFragments()
 	}
 }
 
-void CNetChan::UncompressFragments( dataFragments_t *data )
+bool CNetChan::UncompressFragments( dataFragments_t *data )
 {
 	if ( !data->isCompressed )
-		return;
+		return true;
 
 	 // allocate buffer for uncompressed data, align to 4 bytes boundary
 	char *newbuffer = new char[PAD_NUMBER( data->nUncompressedSize, 4 )];
 	unsigned int uncompressedSize = data->nUncompressedSize;
 
 	// uncompress data
-	COM_BufferToBufferDecompress( newbuffer, &uncompressedSize, data->buffer, data->bytes );
-
-	Assert( uncompressedSize == data->nUncompressedSize );
+	if ( !COM_BufferToBufferDecompress( newbuffer, &uncompressedSize, data->buffer, data->bytes ) ||
+		uncompressedSize != data->nUncompressedSize )
+	{
+		delete [] newbuffer;
+		return false;
+	}
 
 	// free old buffer and set new buffer
 	delete [] data->buffer;
 	data->buffer = newbuffer;
 	data->bytes = uncompressedSize;
 	data->isCompressed = false;
+	return true;
 }
 
 unsigned int CNetChan::RequestFile(const char *filename)
@@ -2350,7 +2354,8 @@ bool CNetChan::CheckReceivingList(int nList)
 
 	if ( data->isCompressed )
 	{
-		UncompressFragments( data );
+		if ( !UncompressFragments( data ) )
+			return false;
 	}
 
 	if ( !data->filename[0] )

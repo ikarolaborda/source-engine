@@ -1478,8 +1478,8 @@ CTextureManager::CTextureManager( void )
 	m_pIdentityLightWarp = NULL;
 	m_pFullScreenDepthTexture = NULL;
 	m_pDebugLuxels2D = NULL;
-	m_pAsyncLoader = new AsyncLoader;
-	m_pAsyncReader = new AsyncReader;
+	m_pAsyncLoader = NULL;
+	m_pAsyncReader = NULL;
 	m_iSuspendTextureStreaming = 0;
 }
 
@@ -1489,6 +1489,12 @@ CTextureManager::CTextureManager( void )
 //-----------------------------------------------------------------------------
 void CTextureManager::Init( int nFlags )
 {
+	// A module load is not a successful material-system initialization. Starting
+	// workers in the singleton constructor left them running through dlclose
+	// when shader-device Init failed before TextureManager()->Init was reached.
+	Assert( !m_pAsyncLoader && !m_pAsyncReader );
+	m_pAsyncLoader = new AsyncLoader;
+	m_pAsyncReader = new AsyncReader;
 	m_nFlags = nFlags;
 	color32 color, color2;
 	m_iNextTexID = 4096;
@@ -3134,4 +3140,3 @@ static ImageFormat GetImageFormatRawReadback( ImageFormat fmt )
 
 	return fmt;
 }
-

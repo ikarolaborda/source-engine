@@ -431,7 +431,8 @@ static void ReadMaterialSystemConfigFromRegistry( MaterialSystem_Config_t &confi
 
 		// Make sure the width / height isn't too large for this display.
 		SDL_Rect rect;
-		if ( !SDL_GetDisplayBounds( displayIndex, &rect ) )
+		// Metal render pixels are independent of SDL's desktop window points.
+		if ( !CommandLine()->FindParm( "-metal" ) && !SDL_GetDisplayBounds( displayIndex, &rect ) )
 		{
 			if ( ( config.m_VideoMode.m_Width > rect.w ) || ( config.m_VideoMode.m_Height > rect.h ) )
 			{
@@ -654,7 +655,7 @@ static void OverrideMaterialSystemConfigFromCommandLine( MaterialSystem_Config_t
 
 			// Make sure the width / height isn't too large for this display.
 			SDL_Rect rect;
-			if ( !SDL_GetDisplayBounds( displayIndex, &rect ) )
+			if ( !CommandLine()->FindParm( "-metal" ) && !SDL_GetDisplayBounds( displayIndex, &rect ) )
 			{
 				if ( ( config.m_VideoMode.m_Width > rect.w ) || ( config.m_VideoMode.m_Height > rect.h ) )
 				{

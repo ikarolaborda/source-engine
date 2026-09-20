@@ -18,6 +18,7 @@ source-filesystem = { path = "../source-filesystem" }
 source-host = { path = "../source-host" }
 source-input = { path = "../source-input" }
 source-net = { path = "../source-net" }
+source-pak = { path = "../source-pak" }
 source-materialsystem = { path = "../source-materialsystem" }
 source-render = { path = "../source-render" }
 source-save = { path = "../source-save" }

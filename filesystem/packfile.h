@@ -26,7 +26,9 @@
 #include "basefilesystem.h"
 #include "tier1/refcount.h"
 #include "tier1/utlbuffer.h"
+#if !defined( SOURCE_RUST_ENGINE )
 #include "tier1/lzmaDecoder.h"
+#endif
 
 class CPackFile;
 class CZipPackFile;
@@ -47,6 +49,7 @@ public:
 	virtual int64  AbsoluteBaseOffset()        = 0;
 };
 
+#if !defined( SOURCE_RUST_ENGINE )
 class CZipPackFileHandle : public CPackFileHandle
 {
 public:
@@ -108,6 +111,7 @@ private:
 	// Size of the decompressed data
 	unsigned int m_nOriginalSize;
 };
+#endif
 
 //-----------------------------------------------------------------------------
 
@@ -126,6 +130,9 @@ public:
 
 	// The two functions a pack file must provide
 	virtual bool Prepare( int64 fileLen = -1, int64 nFileOfs = 0 ) = 0;
+#if defined( SOURCE_RUST_ENGINE )
+	virtual uint64 GetRustPackIndex() const = 0;
+#endif
 
 	// Returns the filename for a given file in the pack. Returns true if a filename is found, otherwise buffer is filled with "unknown"
 	virtual bool IndexToFilename( int nIndex, char* buffer, int nBufferSize ) = 0;
@@ -134,7 +141,9 @@ public:
 
 	virtual void SetupPreloadData() {}
 	virtual void DiscardPreloadData() {}
+#if !defined( SOURCE_RUST_ENGINE )
 	virtual int64 GetPackFileBaseOffset() = 0;
+#endif
 
 	CBaseFileSystem *FileSystem() { return m_fs; }
 
@@ -155,7 +164,9 @@ public:
 	CUtlSymbol			m_Path;
 
 	// possibly embedded pack
+#if !defined( SOURCE_RUST_ENGINE )
 	int64				m_nBaseOffset;
+#endif
 
 	CUtlString			m_ZipName;
 
@@ -173,10 +184,11 @@ public:
 
 	int					m_PackFileID;
 protected:
+#if !defined( SOURCE_RUST_ENGINE )
 	// This is the core IO routine for reading anything from a pack file, everything should go through here at some point
 	virtual int ReadFromPack( int nIndex, void* buffer, int nDestBytes, int nBytes, int64 nOffset ) = 0;
+#endif
 
-	int64				m_FileLength;
 	CBaseFileSystem		*m_fs;
 
 	friend class		CPackFileHandle;
@@ -191,17 +203,24 @@ public:
 
 	// Loads the pack file
 	virtual bool Prepare( int64 fileLen = -1, int64 nFileOfs = 0 ) OVERRIDE;
+#if defined( SOURCE_RUST_ENGINE )
+	virtual uint64 GetRustPackIndex() const OVERRIDE { return m_nRustPakIndex; }
+#endif
 	virtual bool ContainsFile( const char *pFileName ) OVERRIDE;
 	virtual CFileHandle *OpenFile( const char *pFileName, const char *pOptions = "rb" ) OVERRIDE;
 
 	virtual void GetFileAndDirLists( const char *pFindWildCard, CUtlStringList &outDirnames, CUtlStringList &outFilenames, bool bSortedOutput ) OVERRIDE;
 
+#if !defined( SOURCE_RUST_ENGINE )
 	virtual int64 GetPackFileBaseOffset() OVERRIDE { return m_nBaseOffset; }
+#endif
 
 	virtual bool IndexToFilename( int nIndex, char *pBuffer, int nBufferSize ) OVERRIDE;
 
 protected:
+#if !defined( SOURCE_RUST_ENGINE )
 	virtual int  ReadFromPack( int nIndex, void* buffer, int nDestBytes, int nBytes, int64 nOffset  ) OVERRIDE;
+#endif
 
 	#pragma pack(1)
 
@@ -228,6 +247,10 @@ protected:
 
 	#pragma pack()
 
+#if defined( SOURCE_RUST_ENGINE )
+	uint64 m_nRustPakIndex;
+	uint32 m_nRustPakEntries;
+#else
 	// A Pack file directory entry:
 	class CPackFileEntry
 	{
@@ -253,6 +276,7 @@ protected:
 
 	// Entries to the individual files stored inside the pack file.
 	CUtlSortVector< CPackFileEntry, CPackFileLessFunc > m_PackFiles;
+#endif
 
 	bool						GetFileInfo( const char *pFileName, int &nBaseIndex, int64 &nFileOffset, int &nOriginalSize, int &nCompressedSize, unsigned short &nCompressionMethod );
 

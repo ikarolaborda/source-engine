@@ -15,8 +15,10 @@ source-compress = { path = "../crates/source-compress" }
 source-console = { path = "../crates/source-console" }
 source-demo = { path = "../crates/source-demo" }
 source-dmx = { path = "../crates/source-dmx" }
+source-filesystem = { path = "../crates/source-filesystem" }
 source-keyvalues = { path = "../crates/source-keyvalues" }
 source-net = { path = "../crates/source-net" }
+source-pak = { path = "../crates/source-pak" }
 source-save = { path = "../crates/source-save" }
 source-scene = { path = "../crates/source-scene" }
 source-studio = { path = "../crates/source-studio" }
@@ -80,8 +82,29 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mount_table"
+path = "fuzz_targets/mount_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pak"
+path = "fuzz_targets/pak.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "scene"
 path = "fuzz_targets/scene.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_plan"
+path = "fuzz_targets/search_plan.rs"
 test = false
 doc = false
 bench = false

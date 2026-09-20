@@ -271,9 +271,21 @@ void CShaderDeviceMgrDx8::Disconnect()
 //-----------------------------------------------------------------------------
 InitReturnVal_t CShaderDeviceMgrDx8::Init( )
 {
+	// Deterministic failure-path gate: Connect has registered the shader
+	// module's convars, but no device resources have been initialized yet.
+	if ( CommandLine()->FindParm( "-test_fail_shader_device_init" ) )
+	{
+		Warning( "Shader device initialization failure injected for lifecycle test\n" );
+		return INIT_FAILED;
+	}
 	// FIXME: Remove call to InitAdapterInfo once Steam startup issues are resolved.
 	// Do it in Connect instead.
 	InitAdapterInfo();
+	if ( m_Adapters.Count() == 0 )
+	{
+		Warning( "Shader device initialization failed: no graphics adapters were enumerated\n" );
+		return INIT_FAILED;
+	}
 
 	return INIT_OK;
 }

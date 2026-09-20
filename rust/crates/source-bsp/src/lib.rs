@@ -3003,6 +3003,63 @@ pub struct Header {
     pub map_revision: i32,
 }
 
+impl Header {
+    /// Parse only the fixed header. Callers reading a header separately from
+    /// its file must validate every lump range they intend to consume.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let mut reader = Reader::new(bytes);
+        let ident = reader.read_u32_le()?;
+        if ident != BSP_IDENT {
+            return Err(Error::InvalidIdent(ident));
+        }
+        let version = reader.read_i32_le()?;
+        if !(19..=21).contains(&version) {
+            return Err(Error::UnsupportedVersion(version));
+        }
+        let mut lumps = [LumpHeader::default(); BSP_LUMP_COUNT];
+        for lump in &mut lumps {
+            *lump = LumpHeader {
+                offset: reader.read_i32_le()?,
+                length: reader.read_i32_le()?,
+                version: reader.read_i32_le()?,
+                uncompressed_size: reader.read_i32_le()?,
+            };
+        }
+        Ok(Self {
+            version,
+            lumps,
+            map_revision: reader.read_i32_le()?,
+        })
+    }
+
+    /// Locate the embedded ZIP without loading the other map lumps. An empty
+    /// range means no pack. The ZIP must be uncompressed at the BSP-lump layer;
+    /// compression of individual ZIP entries is handled by the archive reader.
+    pub fn pakfile_range(&self, file_length: u64) -> Result<std::ops::Range<u64>> {
+        let lump = self.lumps[LUMP_PAKFILE];
+        let bad = || Error::InvalidLump {
+            index: LUMP_PAKFILE,
+            offset: lump.offset,
+            length: lump.length,
+        };
+        if file_length < BSP_HEADER_SIZE as u64 || lump.offset < 0 || lump.length < 0 {
+            return Err(bad());
+        }
+        if lump.uncompressed_size != 0 {
+            return Err(Error::CompressedCoreLump(LUMP_PAKFILE));
+        }
+        if lump.length == 0 {
+            return Ok(0..0);
+        }
+        let start = lump.offset as u64;
+        let end = start + lump.length as u64;
+        if start < BSP_HEADER_SIZE as u64 || end > file_length {
+            return Err(bad());
+        }
+        Ok(start..end)
+    }
+}
+
 #[derive(Debug)]
 pub struct Bsp<'a> {
     header: Header,
@@ -3018,34 +3075,11 @@ impl<'a> Bsp<'a> {
         if bytes.len() > limits.max_file_size {
             return Err(Error::FileTooLarge(bytes.len()));
         }
-        let mut reader = Reader::new(bytes);
-        let ident = reader.read_u32_le()?;
-        if ident != BSP_IDENT {
-            return Err(Error::InvalidIdent(ident));
+        let header = Header::parse(bytes)?;
+        for (index, lump) in header.lumps.iter().copied().enumerate() {
+            validate_lump(bytes, limits, index, lump)?;
         }
-        let version = reader.read_i32_le()?;
-        if !(19..=21).contains(&version) {
-            return Err(Error::UnsupportedVersion(version));
-        }
-        let mut lumps = [LumpHeader::default(); BSP_LUMP_COUNT];
-        for (index, lump) in lumps.iter_mut().enumerate() {
-            *lump = LumpHeader {
-                offset: reader.read_i32_le()?,
-                length: reader.read_i32_le()?,
-                version: reader.read_i32_le()?,
-                uncompressed_size: reader.read_i32_le()?,
-            };
-            validate_lump(bytes, limits, index, *lump)?;
-        }
-        let map_revision = reader.read_i32_le()?;
-        Ok(Self {
-            header: Header {
-                version,
-                lumps,
-                map_revision,
-            },
-            bytes,
-        })
+        Ok(Self { header, bytes })
     }
 
     pub fn header(&self) -> &Header {
@@ -4352,6 +4386,63 @@ mod tests {
 
         let repacked = bsp.to_builder().build().unwrap();
         assert_eq!(first, repacked);
+    }
+
+    #[test]
+    fn locates_pack_from_header_without_loading_other_lumps() {
+        for version in 19..=21 {
+            let mut builder = Builder::new(version, 7);
+            builder.set_lump(LUMP_PAKFILE, 0, 0, b"archive bytes".to_vec());
+            let bytes = builder.build().unwrap();
+            let mut header = Header::parse(&bytes[..BSP_HEADER_SIZE]).unwrap();
+            let range = header.pakfile_range(bytes.len() as u64).unwrap();
+            assert_eq!(
+                &bytes[range.start as usize..range.end as usize],
+                b"archive bytes"
+            );
+            assert_eq!(header, *Bsp::parse(&bytes).unwrap().header());
+            // Only the pack range is relevant to this operation.
+            header.lumps[LUMP_ENTITIES].offset = -1;
+            assert_eq!(header.pakfile_range(bytes.len() as u64).unwrap(), range);
+            assert!(header.pakfile_range(range.end - 1).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_headers_and_invalid_pack_ranges() {
+        let bytes = Builder::new(20, 0).build().unwrap();
+        for length in 0..BSP_HEADER_SIZE {
+            assert!(Header::parse(&bytes[..length]).is_err());
+        }
+        let mut header = Header::parse(&bytes).unwrap();
+        assert_eq!(header.pakfile_range(bytes.len() as u64).unwrap(), 0..0);
+        for (offset, length, compressed) in [
+            (-1, 0, 0),
+            (1036, -1, 0),
+            (1035, 1, 0),
+            (1036, 8, 0),
+            (1036, 0, 1),
+            (1036, 1, -1),
+        ] {
+            header.lumps[LUMP_PAKFILE] = LumpHeader {
+                offset,
+                length,
+                uncompressed_size: compressed,
+                version: 0,
+            };
+            assert!(header.pakfile_range(1037).is_err());
+        }
+        header.lumps[LUMP_PAKFILE] = LumpHeader {
+            offset: i32::MAX,
+            length: i32::MAX,
+            version: 0,
+            uncompressed_size: 0,
+        };
+        assert!(header.pakfile_range(i32::MAX as u64).is_err());
+        assert_eq!(
+            header.pakfile_range(u64::MAX).unwrap().end,
+            2 * i32::MAX as u64
+        );
     }
 
     #[test]

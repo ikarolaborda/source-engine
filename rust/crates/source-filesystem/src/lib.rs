@@ -1,5 +1,12 @@
 //! Path contracts for the Rust-owned content boundary.
 
+pub mod gameinfo;
+pub mod mount_table;
+pub mod pack_archive;
+pub mod pack_mounts;
+pub mod search_plan;
+pub mod selection;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
@@ -98,12 +105,11 @@ enum MountKind {
         directory_path: PathBuf,
         archive: Arc<source_vpk::OwnedArchive>,
     },
-    /// The archive a map carries inside itself. It has no path of its own,
-    /// because it is a lump of the loaded map rather than a file, so it is
-    /// mounted from bytes and named after the map for reporting.
+    /// A standalone ZIP or the archive a map carries inside itself.
     Pak {
-        name: String,
-        pak: Arc<source_pak::Pak>,
+        archive_path: PathBuf,
+        pak: Arc<pack_archive::Archive>,
+        is_map: bool,
     },
 }
 
@@ -146,6 +152,17 @@ struct Mount {
     path_id: String,
     by_request_only: bool,
     kind: MountKind,
+}
+
+impl Mount {
+    fn matches(&self, requested: Option<&str>) -> bool {
+        selection::path_id_matches(
+            &self.path_id,
+            requested,
+            self.by_request_only,
+            matches!(self.kind, MountKind::Pak { is_map: true, .. }),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -233,6 +250,16 @@ pub struct FindEntry {
 pub struct SearchPaths {
     mounts: Vec<Mount>,
     vpk_cache: HashMap<PathBuf, Arc<source_vpk::OwnedArchive>>,
+    pak_cache: HashMap<PakCacheKey, Arc<pack_archive::Archive>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct PakCacheKey {
+    path: PathBuf,
+    offset: u64,
+    length: u64,
+    file_length: u64,
+    modified: Option<std::time::SystemTime>,
 }
 
 impl SearchPaths {
@@ -249,6 +276,10 @@ impl SearchPaths {
     }
 
     pub fn clear(&mut self) {
+        // Keep the current generation for a cheap search-path rebuild, but
+        // release archives no longer mounted on the following clear. Do not
+        // accumulate every map visited during a campaign.
+        self.pak_cache.retain(|_, pak| Arc::strong_count(pak) > 1);
         self.mounts.clear();
     }
 
@@ -349,13 +380,104 @@ impl SearchPaths {
         path_id: impl Into<String>,
         position: Position,
     ) -> std::result::Result<(), ReadError> {
-        let pak = Arc::new(source_pak::Pak::parse(pakfile)?);
+        let pak = Arc::new(pack_archive::Archive::memory(pakfile)?);
         self.insert(
             Mount {
                 path_id: path_id.into(),
                 by_request_only: false,
                 kind: MountKind::Pak {
-                    name: name.into(),
+                    archive_path: PathBuf::from(format!("{}.bsp", name.into())),
+                    pak,
+                    is_map: true,
+                },
+            },
+            position,
+        );
+        Ok(())
+    }
+
+    /// Opens and validates only the ZIP range in a physical archive/BSP file.
+    /// The caller supplies archive location, not parsed entries or payloads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mount_pak_file_with_flags(
+        &mut self,
+        archive_path: impl AsRef<Path>,
+        offset: u64,
+        length: u64,
+        path_id: impl Into<String>,
+        position: Position,
+        by_request_only: bool,
+    ) -> std::result::Result<(), ReadError> {
+        let archive_path = absolute_path(archive_path.as_ref())?;
+        let (file, metadata) = pack_archive::open_regular_file(&archive_path)?;
+        if !metadata.is_file()
+            || offset
+                .checked_add(length)
+                .is_none_or(|end| end > metadata.len())
+        {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "pak range outside file").into(),
+            );
+        }
+        if length > source_pak::Limits::default().max_archive_size as u64 {
+            return Err(source_pak::Error::ArchiveTooLarge.into());
+        }
+        let key = PakCacheKey {
+            path: std::fs::canonicalize(&archive_path)?,
+            offset,
+            length,
+            file_length: metadata.len(),
+            modified: metadata.modified().ok(),
+        };
+        let pak = if let Some(pak) = self.pak_cache.get(&key) {
+            Arc::clone(pak)
+        } else {
+            let pak = Arc::new(pack_archive::Archive::from_file_range(
+                &archive_path,
+                file,
+                &metadata,
+                offset,
+                length,
+            )?);
+            self.pak_cache.insert(key, Arc::clone(&pak));
+            pak
+        };
+        self.insert(
+            Mount {
+                path_id: path_id.into(),
+                by_request_only,
+                kind: MountKind::Pak {
+                    archive_path,
+                    pak,
+                    is_map: false,
+                },
+            },
+            position,
+        );
+        Ok(())
+    }
+
+    /// Share an already-open archive, including its validated index and retained
+    /// descriptor. No path lookup, stat, reopen, reparse or byte-copy occurs.
+    /// Clearing mounts drops this reference, not independent indexes or files.
+    pub fn mount_pack_archive(
+        &mut self,
+        pak: Arc<pack_archive::Archive>,
+        path_id: impl Into<String>,
+        position: Position,
+        by_request_only: bool,
+    ) -> std::result::Result<(), ReadError> {
+        let archive_path = pak
+            .path()
+            .ok_or(pack_archive::Error::InvalidArgument)?
+            .to_path_buf();
+        self.insert(
+            Mount {
+                path_id: path_id.into(),
+                by_request_only,
+                kind: MountKind::Pak {
+                    archive_path,
+                    is_map: pak.kind() == Some(pack_archive::Kind::Bsp),
                     pak,
                 },
             },
@@ -380,12 +502,9 @@ impl SearchPaths {
         virtual_path: &str,
         path_id: Option<&str>,
     ) -> std::result::Result<ReadSource, ReadError> {
-        let normalized = normalize_virtual_path(virtual_path)?;
+        let normalized = normalize_read_path(virtual_path, path_id)?;
         for mount in &self.mounts {
-            if path_id.is_some_and(|wanted| !mount.path_id.eq_ignore_ascii_case(wanted)) {
-                continue;
-            }
-            if path_id.is_none() && mount.by_request_only {
+            if !mount.matches(path_id) {
                 continue;
             }
             match &mount.kind {
@@ -426,8 +545,8 @@ impl SearchPaths {
                     if pak.entry(&normalized).is_none() {
                         continue;
                     }
-                    let data = pak.read(&normalized).map_err(ReadError::Pak)?;
-                    return Ok(ReadSource::Memory(data.to_vec()));
+                    let data = pak.read(&normalized).map_err(ReadError::from)?;
+                    return Ok(ReadSource::Memory(data));
                 }
             }
         }
@@ -439,12 +558,9 @@ impl SearchPaths {
         virtual_path: &str,
         path_id: Option<&str>,
     ) -> std::result::Result<u64, ReadError> {
-        let normalized = normalize_virtual_path(virtual_path)?;
+        let normalized = normalize_read_path(virtual_path, path_id)?;
         for mount in &self.mounts {
-            if path_id.is_some_and(|wanted| !mount.path_id.eq_ignore_ascii_case(wanted)) {
-                continue;
-            }
-            if path_id.is_none() && mount.by_request_only {
+            if !mount.matches(path_id) {
                 continue;
             }
             match &mount.kind {
@@ -490,12 +606,9 @@ impl SearchPaths {
         virtual_path: &str,
         path_id: Option<&str>,
     ) -> std::result::Result<ResolvedReadPath, ReadError> {
-        let normalized = normalize_virtual_path(virtual_path)?;
+        let normalized = normalize_read_path(virtual_path, path_id)?;
         for mount in &self.mounts {
-            if path_id.is_some_and(|wanted| !mount.path_id.eq_ignore_ascii_case(wanted)) {
-                continue;
-            }
-            if path_id.is_none() && mount.by_request_only {
+            if !mount.matches(path_id) {
                 continue;
             }
             match &mount.kind {
@@ -529,13 +642,15 @@ impl SearchPaths {
                         });
                     }
                 }
-                MountKind::Pak { name, pak } => {
+                MountKind::Pak {
+                    archive_path, pak, ..
+                } => {
                     if pak.entry(&normalized).is_some() {
                         // Named the same way a packed VPK path is, so a
                         // caller reporting where a file came from can say
                         // which map carried it.
                         return Ok(ResolvedReadPath {
-                            path: PathBuf::from(format!("{name}.bsp")).join(&normalized),
+                            path: archive_path.join(&normalized),
                             kind: ReadPathKind::Pak,
                         });
                     }
@@ -550,13 +665,10 @@ impl SearchPaths {
         virtual_path: &str,
         path_id: Option<&str>,
     ) -> std::result::Result<bool, ReadError> {
-        let normalized = normalize_virtual_path(virtual_path)?;
+        let normalized = normalize_read_path(virtual_path, path_id)?;
         let vpk_prefix = format!("{}/", normalized.to_ascii_lowercase());
         for mount in &self.mounts {
-            if path_id.is_some_and(|wanted| !mount.path_id.eq_ignore_ascii_case(wanted)) {
-                continue;
-            }
-            if path_id.is_none() && mount.by_request_only {
+            if !mount.matches(path_id) {
                 continue;
             }
             match &mount.kind {
@@ -607,7 +719,11 @@ impl SearchPaths {
         wildcard: &str,
         path_id: Option<&str>,
     ) -> std::result::Result<Vec<FindEntry>, ReadError> {
-        let (directory, pattern) = normalize_find_pattern(wildcard)?;
+        let (directory, pattern) = if path_id.is_some_and(|id| id.eq_ignore_ascii_case("BSP")) {
+            pack_find_pattern(wildcard)?
+        } else {
+            normalize_find_pattern(wildcard)?
+        };
         let prefix = if directory.is_empty() {
             String::new()
         } else {
@@ -617,10 +733,7 @@ impl SearchPaths {
         let mut seen = HashSet::new();
 
         for mount in &self.mounts {
-            if path_id.is_some_and(|wanted| !mount.path_id.eq_ignore_ascii_case(wanted)) {
-                continue;
-            }
-            if path_id.is_none() && mount.by_request_only {
+            if !mount.matches(path_id) {
                 continue;
             }
 
@@ -717,37 +830,14 @@ impl SearchPaths {
                         .collect()
                 }
                 MountKind::Pak { pak, .. } => {
-                    let mut files = BTreeMap::new();
-                    let mut directories = BTreeMap::new();
-                    for entry in pak.entries_under(prefix.trim_end_matches('/')) {
-                        let Some(remainder) = entry.path.strip_prefix(&prefix) else {
-                            continue;
-                        };
-                        // A name with a separator left in it is something
-                        // deeper, so only the directory it sits under is a
-                        // child of this one.
-                        let (name, is_directory) = match remainder.split_once('/') {
-                            Some((name, _)) => (name, true),
-                            None => (remainder, false),
-                        };
-                        if name.is_empty() || !wildcard_matches(&pattern, name) {
-                            continue;
-                        }
-                        let value = FindEntry {
-                            name: name.to_owned(),
-                            is_directory,
-                        };
-                        let key = name.to_ascii_lowercase();
-                        if is_directory {
-                            directories.entry(key).or_insert(value);
-                        } else {
-                            files.entry(key).or_insert(value);
-                        }
-                    }
-                    files
-                        .into_values()
-                        .chain(directories.into_values())
-                        .collect()
+                    let prefix = prefix.to_ascii_lowercase();
+                    archive_matches(
+                        pak.entries_under(prefix.trim_end_matches('/'))
+                            .map(|entry| entry.path.as_str()),
+                        &prefix,
+                        &pattern,
+                        false,
+                    )
                 }
             };
 
@@ -766,6 +856,133 @@ impl SearchPaths {
             Position::Tail => self.mounts.push(mount),
         }
     }
+}
+
+/// Normalize archive-local paths without allowing traversal outside the root.
+fn normalize_pack_path(path: &str, reject_wildcards: bool) -> Result<String> {
+    if path.len() > MAX_VIRTUAL_PATH_BYTES {
+        return Err(Error::PathTooLong(path.len()));
+    }
+    if path.starts_with(['/', '\\']) {
+        return Err(Error::AbsolutePath);
+    }
+    if path.contains(['\0', ':']) {
+        return Err(Error::InvalidComponent(path.to_owned()));
+    }
+    let path = path.replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts
+                    .pop()
+                    .ok_or_else(|| Error::InvalidComponent(path.to_owned()))?;
+            }
+            _ if reject_wildcards && part.contains(['*', '?']) => {
+                return Err(Error::InvalidComponent(part.to_owned()))
+            }
+            _ => parts.push(part),
+        }
+    }
+    Ok(parts.join("/").to_ascii_lowercase())
+}
+
+fn pack_find_pattern(wildcard: &str) -> Result<(String, String)> {
+    if wildcard.is_empty() {
+        return Err(Error::EmptyPath);
+    }
+    if wildcard.len() > MAX_VIRTUAL_PATH_BYTES {
+        return Err(Error::PathTooLong(wildcard.len()));
+    }
+    if wildcard.starts_with(['/', '\\']) {
+        return Err(Error::AbsolutePath);
+    }
+    if wildcard.contains(['\0', ':']) {
+        return Err(Error::InvalidComponent(wildcard.to_owned()));
+    }
+    let wildcard = wildcard.replace('\\', "/");
+    let (directory, pattern) = wildcard.rsplit_once('/').unwrap_or(("", &wildcard));
+    if pattern.is_empty() || matches!(pattern, "." | "..") {
+        return Err(Error::InvalidComponent(pattern.to_owned()));
+    }
+    Ok((normalize_pack_path(directory, true)?, pattern.to_owned()))
+}
+
+fn normalize_read_path(path: &str, requested: Option<&str>) -> Result<String> {
+    if requested.is_some_and(|id| id.eq_ignore_ascii_case("BSP")) {
+        normalize_pack_path(path, false)
+    } else {
+        normalize_virtual_path(path)
+    }
+}
+
+/// Match one metadata-only pack, returning canonical relative paths (not just
+/// basenames), files then directories, sorted/deduplicated within each kind.
+/// Uses the same glob policy as ordinary read mounts, but accepts archive-local
+/// dot/slash normalization and rejects traversal outside the archive root.
+pub fn find_pack_index(index: &source_pak::Index, wildcard: &str) -> Result<Vec<FindEntry>> {
+    let (directory, pattern) = pack_find_pattern(wildcard)?;
+    let prefix = if directory.is_empty() {
+        String::new()
+    } else {
+        format!("{directory}/")
+    };
+    let entries = index.entries();
+    let first = entries.partition_point(|entry| entry.path < prefix);
+    Ok(archive_matches(
+        entries[first..]
+            .iter()
+            .take_while(|entry| entry.path.starts_with(&prefix))
+            .map(|entry| entry.path.as_str()),
+        &prefix,
+        &pattern,
+        true,
+    ))
+}
+
+fn archive_matches<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    prefix: &str,
+    pattern: &str,
+    qualified: bool,
+) -> Vec<FindEntry> {
+    let mut files = BTreeMap::new();
+    let mut directories = BTreeMap::new();
+    for path in paths {
+        // Optional native preload cache is never an asset or directory child.
+        if path == "__preload_section.pre" {
+            continue;
+        }
+        let Some(remainder) = path.strip_prefix(prefix) else {
+            continue;
+        };
+        let (name, is_directory) = remainder
+            .split_once('/')
+            .map_or((remainder, false), |(name, _)| (name, true));
+        if name.is_empty() || !wildcard_matches(pattern, name) {
+            continue;
+        }
+        let value = FindEntry {
+            name: if qualified {
+                format!("{prefix}{name}")
+            } else {
+                name.to_owned()
+            },
+            is_directory,
+        };
+        if is_directory {
+            directories.entry(name.to_owned()).or_insert(value);
+        } else {
+            files.entry(name.to_owned()).or_insert(value);
+        }
+    }
+    // As in mount-wide find, a file wins a colliding virtual directory name.
+    directories.retain(|name, _| !files.contains_key(name));
+    files
+        .into_values()
+        .chain(directories.into_values())
+        .collect()
 }
 
 fn normalize_find_pattern(pattern: &str) -> Result<(String, String)> {
@@ -1184,6 +1401,7 @@ struct OpenFile {
 enum FileBackend {
     Disk(std::fs::File),
     Memory(Cursor<Vec<u8>>),
+    Pack(Cursor<Vec<u8>>),
 }
 
 impl Default for OpenFiles {
@@ -1228,6 +1446,17 @@ impl OpenFiles {
         (handle, size)
     }
 
+    /// Validated pack bytes with seeks clamped to [0, size], matching compressed
+    /// pack handles. Unlike ordinary memory/disk files, seeks cannot pass EOF.
+    pub fn open_pack(&mut self, data: Vec<u8>) -> (u64, u64) {
+        let size = data.len() as u64;
+        let handle = self.insert(OpenFile {
+            backend: FileBackend::Pack(Cursor::new(data)),
+            writable: false,
+        });
+        (handle, size)
+    }
+
     fn insert(&mut self, file: OpenFile) -> u64 {
         let handle = loop {
             let candidate = self.next_handle;
@@ -1251,7 +1480,9 @@ impl OpenFiles {
     ) -> std::result::Result<usize, FileError> {
         match &mut self.file_mut(handle)?.backend {
             FileBackend::Disk(file) => file.read(output).map_err(FileError::Io),
-            FileBackend::Memory(cursor) => cursor.read(output).map_err(FileError::Io),
+            FileBackend::Memory(cursor) | FileBackend::Pack(cursor) => {
+                cursor.read(output).map_err(FileError::Io)
+            }
         }
     }
 
@@ -1265,14 +1496,16 @@ impl OpenFiles {
         }
         match &mut file.backend {
             FileBackend::Disk(file) => file.write(input).map_err(FileError::Io),
-            FileBackend::Memory(_) => unreachable!("writable memory handles are not created"),
+            FileBackend::Memory(_) | FileBackend::Pack(_) => {
+                unreachable!("writable memory handles are not created")
+            }
         }
     }
 
     pub fn flush(&mut self, handle: u64) -> std::result::Result<(), FileError> {
         match &mut self.file_mut(handle)?.backend {
             FileBackend::Disk(file) => file.flush().map_err(FileError::Io),
-            FileBackend::Memory(_) => Ok(()),
+            FileBackend::Memory(_) | FileBackend::Pack(_) => Ok(()),
         }
     }
 
@@ -1282,6 +1515,19 @@ impl OpenFiles {
         offset: i64,
         origin: u32,
     ) -> std::result::Result<u64, FileError> {
+        let backend = &mut self.file_mut(handle)?.backend;
+        if let FileBackend::Pack(cursor) = backend {
+            let size = cursor.get_ref().len() as i128;
+            let base = match origin {
+                0 => 0,
+                1 => cursor.position() as i128,
+                2 => size,
+                _ => return Err(FileError::InvalidMode(format!("seek origin {origin}"))),
+            };
+            let position = (base + offset as i128).clamp(0, size) as u64;
+            cursor.set_position(position);
+            return Ok(position);
+        }
         let position = match origin {
             0 => SeekFrom::Start(
                 u64::try_from(offset)
@@ -1291,16 +1537,19 @@ impl OpenFiles {
             2 => SeekFrom::End(offset),
             _ => return Err(FileError::InvalidMode(format!("seek origin {origin}"))),
         };
-        match &mut self.file_mut(handle)?.backend {
+        match backend {
             FileBackend::Disk(file) => file.seek(position).map_err(FileError::Io),
             FileBackend::Memory(cursor) => cursor.seek(position).map_err(FileError::Io),
+            FileBackend::Pack(_) => unreachable!("pack seeks handled above"),
         }
     }
 
     pub fn tell(&mut self, handle: u64) -> std::result::Result<u64, FileError> {
         match &mut self.file_mut(handle)?.backend {
             FileBackend::Disk(file) => file.stream_position().map_err(FileError::Io),
-            FileBackend::Memory(cursor) => cursor.stream_position().map_err(FileError::Io),
+            FileBackend::Memory(cursor) | FileBackend::Pack(cursor) => {
+                cursor.stream_position().map_err(FileError::Io)
+            }
         }
     }
 
@@ -1310,7 +1559,9 @@ impl OpenFiles {
                 .metadata()
                 .map(|value| value.len())
                 .map_err(FileError::Io),
-            FileBackend::Memory(cursor) => Ok(cursor.get_ref().len() as u64),
+            FileBackend::Memory(cursor) | FileBackend::Pack(cursor) => {
+                Ok(cursor.get_ref().len() as u64)
+            }
         }
     }
 
@@ -1874,6 +2125,112 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn pack_cursors_clamp_seeks_and_remain_read_only() {
+        let mut files = OpenFiles::new();
+        let (file, size) = files.open_pack(b"payload".to_vec());
+        assert_eq!(size, 7);
+        assert_eq!(files.seek(file, i64::MAX, 0).unwrap(), 7);
+        assert_eq!(files.seek(file, i64::MIN, 1).unwrap(), 0);
+        assert_eq!(files.seek(file, -2, 2).unwrap(), 5);
+        let mut bytes = [0; 10];
+        assert_eq!(files.read(file, &mut bytes).unwrap(), 2);
+        assert_eq!(&bytes[..2], b"ad");
+        assert_eq!(files.read(file, &mut bytes).unwrap(), 0);
+        assert!(files.seek(file, 0, 3).is_err());
+        assert_eq!(files.tell(file).unwrap(), 7);
+        assert_eq!(files.seek(file, -1, 0).unwrap(), 0);
+        assert!(files.write(file, b"x").is_err());
+        files.flush(file).unwrap();
+        assert_eq!(files.size(file).unwrap(), 7);
+        assert!(files.close(file));
+        assert!(!files.close(file));
+        assert!(files.read(file, &mut bytes).is_err());
+        let (empty, size) = files.open_pack(Vec::new());
+        assert_eq!(size, 0);
+        assert_eq!(files.seek(empty, i64::MAX, 2).unwrap(), 0);
+        assert_eq!(files.read(empty, &mut bytes).unwrap(), 0);
+    }
+
+    #[test]
+    fn pack_find_uses_shared_globs_and_canonical_deduplicated_children() {
+        let bytes = pakfile(&[
+            ("README", b"root"),
+            ("__preload_section.pre", b"cache"),
+            ("cfg/a.vmt", b"a"),
+            ("cfg/b.vmt", b"b"),
+            ("cfg/multi.part.vmt", b"m"),
+            ("cfg/noext", b"n"),
+            ("cfg/sub/one.txt", b"1"),
+            ("cfg/sub/two.txt", b"2"),
+            ("cfg/dot.name/a", b"d"),
+            ("cfg/same", b"f"),
+            ("cfg/same/child", b"d"),
+        ]);
+        let index = source_pak::Index::parse(&bytes).unwrap();
+        let names = |pattern| {
+            find_pack_index(&index, pattern)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.name, entry.is_directory))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names("*.*"),
+            vec![("readme".into(), false), ("cfg".into(), true)]
+        );
+        assert_eq!(
+            names("CFG\\.\\sub\\..\\*.VMT"),
+            vec![
+                ("cfg/a.vmt".into(), false),
+                ("cfg/b.vmt".into(), false),
+                ("cfg/multi.part.vmt".into(), false),
+            ]
+        );
+        assert_eq!(
+            names("cfg/*a*.?mt"),
+            vec![
+                ("cfg/a.vmt".into(), false),
+                ("cfg/multi.part.vmt".into(), false)
+            ]
+        );
+        assert_eq!(
+            names("cfg/s*"),
+            vec![("cfg/same".into(), false), ("cfg/sub".into(), true)]
+        );
+        assert_eq!(names("cfg/dot.*"), vec![("cfg/dot.name".into(), true)]);
+        assert_eq!(names("cfg//noext"), vec![("cfg/noext".into(), false)]);
+        assert!(names("missing/*").is_empty());
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_pak(&bytes, "fixture", "GAME", Position::Head)
+            .unwrap();
+        assert_eq!(paths.find("CFG/*.VMT", Some("GAME")).unwrap().len(), 3);
+        assert_eq!(paths.find("*.*", Some("GAME")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pack_find_rejects_escape_and_unsupported_directory_patterns() {
+        let index = source_pak::Index::parse(&pakfile(&[("a.txt", b"a")])).unwrap();
+        for pattern in [
+            "",
+            "/a*",
+            "\\a*",
+            "C:a*",
+            "a\0b",
+            "../*",
+            "a/../../*",
+            "a*/b",
+            "?/b",
+            "a/",
+            "a/.",
+            "a/..",
+        ] {
+            assert!(find_pack_index(&index, pattern).is_err(), "{pattern:?}");
+        }
+        assert!(find_pack_index(&index, &"x".repeat(MAX_VIRTUAL_PATH_BYTES + 1)).is_err());
+    }
+
     /// Builds a stored-only ZIP the way a map's pakfile lump holds one.
     fn pakfile(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -1916,6 +2273,347 @@ mod tests {
         bytes.extend_from_slice(&directory_offset.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn file_paks_preserve_range_precedence_visibility_and_handle_lifetime() {
+        let root = temporary_directory();
+        std::fs::create_dir_all(root.join("materials")).unwrap();
+        std::fs::write(root.join("materials/a.vmt"), b"loose").unwrap();
+        let zip = pakfile(&[
+            ("materials/a.vmt", b"packed"),
+            ("materials/b.vmt", b"unique"),
+        ]);
+        let archive = root.join("test.bsp");
+        let mut bsp = vec![0; 1036];
+        bsp.extend_from_slice(&zip);
+        bsp.extend_from_slice(b"unrelated BSP suffix");
+        std::fs::write(&archive, bsp).unwrap();
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_directory(&root, "GAME", Position::Tail)
+            .unwrap();
+        paths
+            .mount_pak_file_with_flags(
+                &archive,
+                1036,
+                zip.len() as u64,
+                "GAME",
+                Position::Tail,
+                false,
+            )
+            .unwrap();
+        assert_eq!(paths.read("materials/a.vmt", None).unwrap(), b"loose");
+        paths
+            .mount_pak_file_with_flags(
+                &archive,
+                1036,
+                zip.len() as u64,
+                "PRIVATE",
+                Position::Head,
+                true,
+            )
+            .unwrap();
+        assert_eq!(paths.read("materials/a.vmt", None).unwrap(), b"loose");
+        assert_eq!(
+            paths.read("materials/a.vmt", Some("PRIVATE")).unwrap(),
+            b"packed"
+        );
+        assert_eq!(
+            paths
+                .resolve_read_path("materials/b.vmt", None)
+                .unwrap()
+                .path,
+            archive.join("materials/b.vmt")
+        );
+        assert_eq!(paths.file_size("materials/b.vmt", None).unwrap(), 6);
+        assert!(paths.is_directory("materials", None).unwrap());
+        assert_eq!(paths.find("materials/*.vmt", None).unwrap().len(), 2);
+        assert_eq!(
+            paths.pak_cache.len(),
+            1,
+            "different IDs share the parsed range"
+        );
+        let pak = Arc::clone(paths.pak_cache.values().next().unwrap());
+        let mut files = OpenFiles::new();
+        let (handle, _) = files.open_memory(paths.read("materials/b.vmt", None).unwrap());
+        paths.clear();
+        paths
+            .mount_pak_file_with_flags(
+                &archive,
+                1036,
+                zip.len() as u64,
+                "GAME",
+                Position::Head,
+                false,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&pak, paths.pak_cache.values().next().unwrap()));
+        drop(pak);
+        paths.clear();
+        paths.clear();
+        assert!(
+            paths.pak_cache.is_empty(),
+            "unmounted maps must be released"
+        );
+        let mut output = [0; 3];
+        files.seek(handle, 3, 0).unwrap();
+        files.read(handle, &mut output).unwrap();
+        assert_eq!(&output, b"que");
+        assert!(files.close(handle));
+        for (offset, length) in [
+            (u64::MAX, 1),
+            (0, u64::MAX),
+            (1036, zip.len() as u64 + 100),
+            (0, zip.len() as u64),
+        ] {
+            assert!(paths
+                .mount_pak_file_with_flags(&archive, offset, length, "GAME", Position::Tail, false)
+                .is_err());
+            assert!(paths.is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bsp_selection_uses_typed_map_provenance_for_every_query() {
+        use pack_archive::{Archive, Kind};
+        let root = temporary_directory();
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        std::fs::write(root.join("dir/a.txt"), b"loose").unwrap();
+        let zip = pakfile(&[("dir/a.txt", b"zip"), ("zip-only/a", b"zip")]);
+        let zip_path = root.join("standalone.bsp");
+        std::fs::write(&zip_path, &zip).unwrap();
+        let zip = Arc::new(Archive::open(&zip_path, Kind::Zip).unwrap());
+        assert_eq!(zip.kind(), Some(Kind::Zip));
+        let bytes = pakfile(&[("dir/a.txt", b"map")]);
+        let mut bsp = vec![0; source_bsp::BSP_HEADER_SIZE];
+        let offset = bsp.len() as u64;
+        bsp[..4].copy_from_slice(b"VBSP");
+        bsp[4..8].copy_from_slice(&20i32.to_le_bytes());
+        bsp[648..652].copy_from_slice(&(offset as i32).to_le_bytes());
+        bsp[652..656].copy_from_slice(&(bytes.len() as i32).to_le_bytes());
+        bsp.extend_from_slice(&bytes);
+        let bsp_path = root.join("embedded.zip");
+        std::fs::write(&bsp_path, &bsp).unwrap();
+        let map = Arc::new(Archive::open(&bsp_path, Kind::Bsp).unwrap());
+        let range = Arc::new(Archive::open_range(&bsp_path, offset, bytes.len() as u64).unwrap());
+        assert_eq!(map.kind(), Some(Kind::Bsp));
+        assert_eq!(range.kind(), None);
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_directory(&root, "GAME", Position::Head)
+            .unwrap();
+        paths
+            .mount_pack_archive(Arc::clone(&zip), "GAME", Position::Head, false)
+            .unwrap();
+        paths.mount_directory(&root, "BSP", Position::Head).unwrap();
+        paths
+            .mount_pack_archive(Arc::clone(&range), "GAME", Position::Head, false)
+            .unwrap();
+        paths
+            .mount_pack_archive(Arc::clone(&map), "MOD", Position::Head, true)
+            .unwrap();
+        assert!(matches!(
+            paths.read("dir/a.txt", Some("BSP")),
+            Err(ReadError::NotFound(_))
+        ));
+        assert!(paths.find("*", Some("BSP")).unwrap().is_empty());
+        paths
+            .mount_pack_archive(Arc::clone(&map), "GAME", Position::Tail, true)
+            .unwrap();
+        let name = "DIR\\.\\sub\\..\\A.TXT";
+        assert_eq!(paths.read(name, Some("bSp")).unwrap(), b"map");
+        assert_eq!(paths.file_size(name, Some("BSP")).unwrap(), 3);
+        assert_eq!(
+            paths.resolve_read_path(name, Some("BSP")).unwrap().path,
+            bsp_path.join("dir/a.txt")
+        );
+        assert!(paths.is_directory("DIR/./sub/..", Some("BSP")).unwrap());
+        assert!(!paths.is_directory("zip-only", Some("BSP")).unwrap());
+        assert_eq!(
+            paths.find("DIR/./sub/../*.TXT", Some("BSP")).unwrap(),
+            vec![FindEntry {
+                name: "a.txt".into(),
+                is_directory: false
+            }]
+        );
+        assert!(paths.read("../dir/a.txt", Some("BSP")).is_err());
+        assert!(paths.find("dir/*/../*", Some("BSP")).is_err());
+        paths.clear();
+        paths
+            .mount_pak(&bytes, "memory", "GAME", Position::Head)
+            .unwrap();
+        assert_eq!(paths.read("dir/a.txt", Some("BSP")).unwrap(), b"map");
+        drop(paths);
+        drop(map);
+        drop(range);
+        drop(zip);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_archive_mounts_retain_one_owner_without_reopening() {
+        use pack_archive::{Archive, Kind};
+        let root = temporary_directory();
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("shared.zip");
+        let bytes = pakfile(&[
+            ("dir/a.txt", b"original"),
+            ("__preload_section.pre", b"hidden"),
+        ]);
+        std::fs::write(&path, &bytes).unwrap();
+        let archive = Arc::new(Archive::open(&path, Kind::Zip).unwrap());
+        let weak = Arc::downgrade(&archive);
+        assert_eq!(archive.index().entries().len(), 1);
+        assert_eq!(archive.info().length, bytes.len() as u64);
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_pack_archive(Arc::clone(&archive), "PRIVATE", Position::Head, true)
+            .unwrap();
+        assert!(matches!(
+            paths.read("dir/a.txt", None),
+            Err(ReadError::NotFound(_))
+        ));
+        assert_eq!(
+            paths.read("dir/a.txt", Some("private")).unwrap(),
+            b"original"
+        );
+        std::fs::rename(&path, root.join("renamed.zip")).unwrap();
+        std::fs::write(&path, pakfile(&[("dir/a.txt", b"replacement")])).unwrap();
+        paths
+            .mount_pack_archive(Arc::clone(&archive), "GAME", Position::Tail, false)
+            .unwrap();
+        assert!(
+            paths.pak_cache.is_empty(),
+            "shared mounts must not reopen or populate a second cache"
+        );
+        assert_eq!(Arc::strong_count(&archive), 3);
+        assert_eq!(paths.read("dir/a.txt", None).unwrap(), b"original");
+        assert_eq!(paths.file_size("dir/a.txt", None).unwrap(), 8);
+        assert!(paths.is_directory("DIR", None).unwrap());
+        assert_eq!(paths.find("DIR/*.TXT", None).unwrap().len(), 1);
+        assert_eq!(
+            paths.resolve_read_path("dir/a.txt", None).unwrap().path,
+            path.join("dir/a.txt")
+        );
+        assert!(paths.file_size("__preload_section.pre", None).is_err());
+        let mut files = OpenFiles::new();
+        let (file, _) = files.open_pack(paths.read("dir/a.txt", None).unwrap());
+        drop(archive);
+        assert_eq!(paths.read("dir/a.txt", None).unwrap(), b"original");
+        paths.clear();
+        assert!(
+            weak.upgrade().is_none(),
+            "last mount must release descriptor and metadata"
+        );
+        let mut output = [0; 8];
+        files.read(file, &mut output).unwrap();
+        assert_eq!(&output, b"original");
+        assert!(files.close(file));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_archive_corruption_rejects_without_loose_fallback() {
+        use pack_archive::{Archive, Kind};
+        let root = temporary_directory();
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("shared.zip");
+        std::fs::write(&path, pakfile(&[("a", b"original")])).unwrap();
+        std::fs::write(root.join("a"), b"loose").unwrap();
+        let archive = Arc::new(Archive::open(&path, Kind::Zip).unwrap());
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_directory(&root, "GAME", Position::Tail)
+            .unwrap();
+        paths
+            .mount_pack_archive(Arc::clone(&archive), "GAME", Position::Head, false)
+            .unwrap();
+        let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        writer
+            .seek(SeekFrom::Start(archive.entry("a").unwrap().data_offset()))
+            .unwrap();
+        writer.write_all(b"!").unwrap();
+        assert!(matches!(
+            archive.read("a"),
+            Err(pack_archive::Error::Pak(
+                source_pak::Error::CrcMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            paths.read("a", None),
+            Err(ReadError::Pak(source_pak::Error::CrcMismatch { .. }))
+        ));
+        drop(writer);
+        paths.clear();
+        drop(archive);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_and_metadata_only_archives_keep_distinct_payload_contracts() {
+        use pack_archive::Archive;
+        let bytes = pakfile(&[("dir/a", b"bytes"), ("__preload_section.pre", b"hidden")]);
+        let memory = Archive::memory(&bytes).unwrap();
+        let metadata = Arc::new(Archive::metadata_only(&bytes).unwrap());
+        assert_eq!(memory.read("dir/a").unwrap(), b"bytes");
+        assert!(matches!(
+            metadata.read_entry(0),
+            Err(pack_archive::Error::InvalidArgument)
+        ));
+        assert!(matches!(
+            metadata.read_entry(99),
+            Err(pack_archive::Error::NotFound)
+        ));
+        assert!(memory.entry("__preload_section.pre").is_none());
+        let mut paths = SearchPaths::new();
+        assert!(paths
+            .mount_pack_archive(metadata, "GAME", Position::Head, false)
+            .is_err());
+        paths
+            .mount_pak(&bytes, "memory", "GAME", Position::Head)
+            .unwrap();
+        assert_eq!(paths.read("dir/a", None).unwrap(), b"bytes");
+        assert!(paths.read("__preload_section.pre", None).is_err());
+    }
+
+    #[test]
+    fn changed_paks_reload_and_corrupt_winners_do_not_fall_through() {
+        let root = temporary_directory();
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("pak.zip");
+        let zip = pakfile(&[("a", b"old")]);
+        std::fs::write(&archive, &zip).unwrap();
+        std::fs::write(root.join("a"), b"loose").unwrap();
+        let mut paths = SearchPaths::new();
+        paths
+            .mount_pak_file_with_flags(&archive, 0, zip.len() as u64, "GAME", Position::Tail, false)
+            .unwrap();
+        assert_eq!(paths.read("a", None).unwrap(), b"old");
+        paths.clear();
+        let mut zip = pakfile(&[("a", b"new content")]);
+        std::fs::write(&archive, &zip).unwrap();
+        paths
+            .mount_pak_file_with_flags(&archive, 0, zip.len() as u64, "GAME", Position::Head, false)
+            .unwrap();
+        assert_eq!(paths.read("a", None).unwrap(), b"new content");
+        paths.clear();
+        zip[31] ^= 1;
+        // A different physical path also avoids timestamp granularity assumptions.
+        let corrupt = root.join("bad.zip");
+        std::fs::write(&corrupt, &zip).unwrap();
+        paths
+            .mount_directory(&root, "GAME", Position::Tail)
+            .unwrap();
+        paths
+            .mount_pak_file_with_flags(&corrupt, 0, zip.len() as u64, "GAME", Position::Head, false)
+            .unwrap();
+        assert!(matches!(
+            paths.read("a", None),
+            Err(ReadError::Pak(source_pak::Error::CrcMismatch { .. }))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

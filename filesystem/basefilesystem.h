@@ -543,9 +543,52 @@ public:
 		CPackedStoreRefCount *m_pPackedStore;
 	};
 
+#if defined( SOURCE_RUST_ENGINE )
+	// Rust owns ordering and resource leases. This facade preserves legacy
+	// accessors while native path headers still contain pack/VPK references.
+	class CSearchPathTable
+	{
+	public:
+		CSearchPathTable() : m_Registry( 0 ) {}
+		~CSearchPathTable();
+		int Count() const;
+		CSearchPath &operator[]( int index );
+		const CSearchPath &operator[]( int index ) const;
+		CSearchPath &Element( int index ) { return (*this)[index]; }
+		const CSearchPath &Element( int index ) const { return (*this)[index]; }
+		int InsertBefore( int index );
+		int InsertAfter( int index ) { return InsertBefore( index + 1 ); }
+		int AddToHead() { return InsertBefore( 0 ); }
+		int AddToTail() { return InsertBefore( Count() ); }
+		void Remove( int index );
+		void FastRemove( int index );
+		void Purge();
+		void CopyFrom( const CSearchPathTable &source );
+	private:
+		CSearchPathTable( const CSearchPathTable & );
+		void operator=( const CSearchPathTable & );
+		void Ensure();
+		static void DropPath( void *path );
+		static void *ClonePath( const void *path );
+		uint64_t m_Registry;
+	};
+#else
+	typedef CUtlVector<CSearchPath> CSearchPathTable;
+#endif
+
 	class CSearchPathsVisits
 	{
 	public:
+#if defined( SOURCE_RUST_ENGINE )
+		CSearchPathsVisits() : m_RustVisits( 0 ) {}
+		~CSearchPathsVisits();
+		void Reset();
+		bool MarkVisit( const CSearchPath &searchPath );
+	private:
+		CSearchPathsVisits( const CSearchPathsVisits & );
+		void operator=( const CSearchPathsVisits & );
+		uint64_t m_RustVisits;
+#else
 		void Reset()
 		{
 			m_Visits.RemoveAll();
@@ -564,13 +607,17 @@ public:
 
 	private:
 		CUtlVector<int> m_Visits;	// This is a copy of IDs for the search paths we've visited, so 
+#endif
 	};
 
 	class CSearchPathsIterator
 	{
 	public:
 		CSearchPathsIterator( CBaseFileSystem *pFileSystem, const char **ppszFilename, const char *pszPathID, PathTypeFilter_t pathTypeFilter = FILTER_NONE )
-		  : m_iCurrent( -1 ),
+		  :
+#if !defined( SOURCE_RUST_ENGINE )
+			m_iCurrent( -1 ),
+#endif
 			m_PathTypeFilter( pathTypeFilter )
 		{
 			char tempPathID[MAX_PATH];
@@ -610,7 +657,10 @@ public:
 		}
 
 		CSearchPathsIterator( CBaseFileSystem *pFileSystem, const char *pszPathID, PathTypeFilter_t pathTypeFilter = FILTER_NONE )
-		  : m_iCurrent( -1 ),
+		  :
+#if !defined( SOURCE_RUST_ENGINE )
+			m_iCurrent( -1 ),
+#endif
 			m_PathTypeFilter( pathTypeFilter )
 		{
 			if ( pszPathID ) 
@@ -630,20 +680,30 @@ public:
 
 		CSearchPath *GetFirst();
 		CSearchPath *GetNext();
+#if defined( SOURCE_RUST_ENGINE )
+		~CSearchPathsIterator();
+#endif
 
 	private:
 		CSearchPathsIterator( const  CSearchPathsIterator & );
 		void operator=(const CSearchPathsIterator &);
-		void CopySearchPaths( const CUtlVector<CSearchPath>	&searchPaths );
+		void CopySearchPaths( const CSearchPathTable &searchPaths );
 
+#if !defined( SOURCE_RUST_ENGINE )
 		int							m_iCurrent;
+#endif
 		CUtlSymbol					m_pathID;
-		CUtlVector<CSearchPath> 	m_SearchPaths;
+		CSearchPathTable 		m_SearchPaths;
+#if defined( SOURCE_RUST_ENGINE )
+		uint64_t m_RustSearchPlan = 0;
+#else
 		CSearchPathsVisits			m_visits;
+#endif
 		CSearchPath					m_EmptySearchPath;
 		CPathIDInfo					m_EmptyPathIDInfo;
 		PathTypeFilter_t			m_PathTypeFilter;
 		char						m_Filename[MAX_PATH];	// set for relative names only
+		bool IsPlatformExcluded( const CSearchPath *path ) const;
 	};
 
 	friend class CSearchPathsIterator;
@@ -677,7 +737,7 @@ public:
 	CUtlVector< FileSystemLoggingFunc_t > m_LogFuncs;
 
 	CThreadMutex m_SearchPathsMutex;
-	CUtlVector< CSearchPath > m_SearchPaths;
+	CSearchPathTable m_SearchPaths;
 	CUtlVector<CPathIDInfo*> m_PathIDInfos;
 #if defined( SOURCE_RUST_ENGINE )
 	std::atomic<bool> m_bRustReadPathsSynchronized;
@@ -819,7 +879,6 @@ protected:
 #if defined( SOURCE_RUST_ENGINE )
 	void						SyncRustReadPaths();
 	void						SyncRustWritePaths();
-	bool						LegacyPackContainsFile( const char *pFileName, const char *pPathID );
 	bool						TryRustReadFileSize( const char *pFileName, const char *pPathID, uint64_t *pSize );
 	bool						TryRustResolveReadPath( const char *pFileName, const char *pPathID, PathTypeFilter_t pathFilter, OUT_Z_CAP(maxLenInChars) char *pDest, int maxLenInChars, PathTypeQuery_t *pPathType );
 #endif
@@ -932,6 +991,7 @@ inline const CUtlSymbol& CBaseFileSystem::CSearchPath::GetPath() const
 }
 
 
+#if !defined( SOURCE_RUST_ENGINE )
 inline bool CBaseFileSystem::FilterByPathID( const CSearchPath *pSearchPath, const CUtlSymbol &pathID )
 {
 	if ( (UtlSymId_t)pathID == UTL_INVAL_SYMBOL )
@@ -962,6 +1022,7 @@ inline bool CBaseFileSystem::FilterByPathID( const CSearchPath *pSearchPath, con
 		}
 	}
 }
+#endif
 
 #if defined( TRACK_BLOCKING_IO )
 

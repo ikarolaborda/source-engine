@@ -112,17 +112,31 @@ jobs:
 
   build-macos-arm64-rust:
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        game: [hl2, hl2mp, hl1, hl1mp, episodic, portal, cstrike, dod]
 
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@1.85.1
-    - name: Build macos-arm64 rust-engine
+    - name: Build macos-arm64 rust-engine (${{ matrix.game }})
       run: |
-        scripts/build-macos-arm64-rust.sh
+        scripts/build-macos-arm64-rust.sh --build-games=${{ matrix.game }}
+    - name: Audit installed ARM64 Rust and game interfaces
+      run: |
+        python3 scripts/verify_rust_allgames_install.py out-rust-ci --games ${{ matrix.game }} \
+          --cargo-launcher build-rust-ci/cargo-target/release/source-launcher
     # The renderer's Metal path only exists on macOS, so this is the one job
     # that can exercise it against a real GPU.  Its tests open a device and
     # compare captured pixels, which is the gate the visual comparisons build
     # on, and they refuse to pass by skipping on Apple silicon.
     - name: Test the Metal renderer against a device
+      if: matrix.game == 'hl2'
       run: |
         cargo test -p source-render
+        python3 rust/tests/metal_texture_lock.py out-rust-ci/bin/libsource_abi.dylib
+    - name: Compare native pack reads using the Rust index
+      if: matrix.game == 'hl2'
+      run: |
+        sh rust/verify_native_pak.sh out-rust-ci

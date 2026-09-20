@@ -14,6 +14,44 @@
 #endif
 
 // Process-wide access for legacy modules that are loaded after the launcher.
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_create(SourceAbiMountDropFn dropFn, SourceAbiMountCloneFn cloneFn, uint64_t *handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_insert(uint64_t handle, uint32_t index, void *resource);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_count(uint64_t handle, uint32_t *count);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_get(uint64_t handle, uint32_t index, void **resource);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_remove(uint64_t handle, uint32_t index, uint8_t fast);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_clear(uint64_t handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_snapshot(uint64_t handle, uint64_t *copy);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_table_destroy(uint64_t handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_mount_store_id_next(int32_t *id);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_plan_create(
+	const SourceAbiSearchPath *paths, uint32_t count, SourceAbiSlice requested,
+	uint8_t hasRequested, uint32_t filter, uint64_t *handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_plan_next(uint64_t handle, uint32_t *index);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_visits_create(uint64_t *handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_visits_mark(uint64_t handle, int32_t store, uint32_t *seen);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_state_reset(uint64_t handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_search_state_destroy(uint64_t handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_read_path_matches(
+	const char *stored, uint64_t storedLength, const char *requested, uint64_t requestedLength,
+	bool hasRequested, bool byRequestOnly, bool isMapPack, uint32_t *matches);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_pak_index_open_archive(
+	SourceAbiSlice path, uint32_t kind, uint64_t *handle, SourceAbiPakArchiveInfo *info);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_file_open_pak(
+	uint64_t index, uint32_t entry, uint64_t *file, uint64_t *size, uint64_t *absoluteOffset);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_pak_index_destroy(uint64_t handle);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_read_path_add_pak_index(
+	uint64_t index, const char *pathId, uint64_t pathIdLength, bool atHead, bool byRequestOnly);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_find_pack_candidates(
+	SourceAbiSlice root, uint32_t naming, SourceAbiSlice language, SourceAbiMutSlice output,
+	uint64_t *written, uint32_t *isDirectory, uint64_t *find);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_find_first_pak(
+	uint64_t index, SourceAbiSlice pattern, SourceAbiMutSlice output,
+	uint64_t *written, uint32_t *isDirectory, uint64_t *find);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_pak_index_find(
+	uint64_t handle, SourceAbiSlice path, SourceAbiPakEntry *entry);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_pak_index_entry(
+	uint64_t handle, uint32_t index, SourceAbiPakEntry *entry,
+	uint8_t *name, uint64_t capacity, uint64_t *written);
 // The active value is still an opaque C ABI handle; no Rust or C++ object
 // ownership crosses the module boundary.
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_activate(
@@ -75,6 +113,12 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_find_nex
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_find_close(
 	uint64_t find);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_read_paths_clear();
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_run_app_system_group(
+	SourceAbiAppSystemFn callback, void *userData, int32_t *result);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_app_group_startup(
+	SourceAbiAppSystemFn callback, void *userData, uint64_t *handle, int32_t *result);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_app_group_shutdown(
+	uint64_t handle, SourceAbiAppSystemFn callback, void *userData);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_read_path_add_directory_flags(
 	const char *root, uint64_t rootLength, const char *pathId,
 	uint64_t pathIdLength, bool atHead, bool byRequestOnly, bool allowSymlinkEscape);
@@ -166,6 +210,14 @@ extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_lzss_dec
 	uint64_t *length);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_lzss_actual_size(
 	const void *input, uint64_t inputLength, uint64_t *actualSize);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_snappy_max_size(
+	uint64_t inputLength, uint64_t *size);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_snappy_compress(
+	const void *input, uint64_t inputLength, void *output, uint64_t capacity, uint64_t *length);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_buffer_actual_size(
+	const void *input, uint64_t inputLength, uint64_t *size);
+extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_buffer_decompress(
+	const void *input, uint64_t inputLength, void *output, uint64_t capacity, uint64_t *length);
 extern "C" SOURCE_RUST_BRIDGE_EXPORT SourceAbiStatus source_rust_bridge_split_packet_header_encode(
 	int32_t sequence, uint32_t packetNumber, uint32_t packetCount, uint32_t splitSize,
 	void *bytes);
@@ -310,6 +362,9 @@ public:
 		uint64_t outputLength, uint64_t *written) const;
 	SourceAbiStatus ExecutableBase(void *output, uint64_t outputLength,
 		uint64_t *written) const;
+	SourceAbiStatus MountGameInfo(const char *base, uint64_t baseLength,
+		const char *game, uint64_t gameLength, const char *externalRoot,
+		uint64_t externalRootLength, uint64_t *mountCount) const;
 	SourceAbiStatus MountDirectory(const char *root, uint64_t rootLength,
 		const char *pathId, uint64_t pathIdLength, bool atHead) const;
 	SourceAbiStatus MountVpk(const char *directoryPath, uint64_t directoryPathLength,

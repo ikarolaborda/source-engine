@@ -12,6 +12,9 @@
 #include "interface.h"
 #include "filesystem.h"
 #include "filesystem_init.h"
+#if defined( SOURCE_RUST_ENGINE )
+#include "rust_engine_bridge.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -29,6 +32,8 @@
 CAppSystemGroup::CAppSystemGroup( CAppSystemGroup *pAppSystemParent ) : m_SystemDict(false, 0, 16)
 {
 	m_pParentAppSystem = pAppSystemParent;
+	m_nErrorStage = NONE;
+	m_nRustLifecycleHandle = 0;
 }
 
 
@@ -275,6 +280,7 @@ CAppSystemGroup *CAppSystemGroup::GetParent()
 //-----------------------------------------------------------------------------
 // Method to connect/disconnect all systems
 //-----------------------------------------------------------------------------
+#if !defined( SOURCE_RUST_ENGINE )
 bool CAppSystemGroup::ConnectSystems()
 {
 	for (int i = 0; i < m_Systems.Count(); ++i )
@@ -325,6 +331,7 @@ void CAppSystemGroup::ShutdownSystems()
 		m_Systems[i]->Shutdown();
 	}
 }
+#endif
 
 
 //-----------------------------------------------------------------------------
@@ -365,8 +372,72 @@ CreateInterfaceFn CAppSystemGroup::GetFactory()
 //-----------------------------------------------------------------------------
 // Main application loop
 //-----------------------------------------------------------------------------
+#if defined( SOURCE_RUST_ENGINE )
+int32 CAppSystemGroup::RustLifecycleStep( void *userData, uint32 operation, uint32 index )
+{
+	CAppSystemGroup *group = static_cast<CAppSystemGroup *>( userData );
+	s_pCurrentAppSystem = group;
+	switch ( operation )
+	{
+	case SOURCE_APP_CREATE:
+		if ( group->Create() )
+			return group->m_Systems.Count();
+		group->m_nErrorStage = CREATION;
+		return -1;
+	case SOURCE_APP_CONNECT:
+		if ( group->m_Systems[index]->Connect( GetFactory() ) )
+			return 0;
+		group->ReportStartupFailure( CONNECTION, index );
+		group->m_nErrorStage = CONNECTION;
+		return -1;
+	case SOURCE_APP_PREINIT:
+		if ( group->PreInit() )
+			return 0;
+		group->m_nErrorStage = PREINITIALIZATION;
+		return -1;
+	case SOURCE_APP_INIT:
+		if ( group->m_Systems[index]->Init() == INIT_OK )
+			return 0;
+		group->ReportStartupFailure( INITIALIZATION, index );
+		group->m_nErrorStage = INITIALIZATION;
+		return -1;
+	case SOURCE_APP_MAIN: return group->Main();
+	case SOURCE_APP_SHUTDOWN: group->m_Systems[index]->Shutdown(); break;
+	case SOURCE_APP_POSTSHUTDOWN: group->PostShutdown(); break;
+	case SOURCE_APP_DISCONNECT: group->m_Systems[index]->Disconnect(); break;
+	case SOURCE_APP_REMOVE_SYSTEMS: group->RemoveAllSystems(); break;
+	case SOURCE_APP_UNLOAD_MODULES: group->UnloadAllModules(); break;
+	case SOURCE_APP_DESTROY: group->Destroy(); break;
+	default: return -1;
+	}
+	return 0;
+}
+#endif
+
 int CAppSystemGroup::Run()
-{	
+{
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_nRustLifecycleHandle != 0 )
+	{
+		Warning( "Cannot run an active app-system group\n" );
+		return -1;
+	}
+	m_nRustLifecycleHandle = ~(uint64)0;
+	s_pCurrentAppSystem = this;
+	m_nErrorStage = NONE;
+	int32_t result = -1;
+	const SourceAbiStatus status = source_rust_bridge_run_app_system_group(
+		RustLifecycleStep, this, &result );
+	m_nRustLifecycleHandle = 0;
+	s_pCurrentAppSystem = GetParent();
+	if ( status != SOURCE_ABI_OK )
+	{
+		Warning( "Rust app-system lifecycle failed: status %d\n", status );
+		return -1;
+	}
+	Msg( "Rust app-system group cleanup complete: stage %d, result %d\n", m_nErrorStage, result );
+	return result;
+#else
 	// The factory now uses this app system group
 	s_pCurrentAppSystem	= this;
 
@@ -386,6 +457,7 @@ int CAppSystemGroup::Run()
 	s_pCurrentAppSystem	= GetParent();
 
 	return nRetVal;
+#endif
 }
 
 
@@ -409,6 +481,30 @@ void CAppSystemGroup::Shutdown()
 //-----------------------------------------------------------------------------
 int CAppSystemGroup::OnStartup()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_nRustLifecycleHandle != 0 )
+	{
+		Warning( "Cannot start an active app-system group\n" );
+		return -1;
+	}
+	m_nRustLifecycleHandle = ~(uint64)0;
+	m_nErrorStage = NONE;
+	uint64_t handle = 0;
+	int32_t result = -1;
+	const SourceAbiStatus status = source_rust_bridge_app_group_startup(
+		RustLifecycleStep, this, &handle, &result );
+	m_nRustLifecycleHandle = handle;
+	if ( status != SOURCE_ABI_OK || result != 0 )
+	{
+		if ( status != SOURCE_ABI_OK )
+			m_nErrorStage = CREATION;
+		s_pCurrentAppSystem = GetParent();
+		Msg( "Rust split app-system startup rolled back: stage %d, status %d\n", m_nErrorStage, status );
+		return -1;
+	}
+	Msg( "Rust split app-system startup ready\n" );
+	return INIT_OK;
+#else
 	// The factory now uses this app system group
 	s_pCurrentAppSystem	= this;
 
@@ -444,10 +540,34 @@ int CAppSystemGroup::OnStartup()
 	}
 
 	return nRetVal;
+#endif
 }
 
 void CAppSystemGroup::OnShutdown()
 {
+#if defined( SOURCE_RUST_ENGINE )
+	if ( m_nRustLifecycleHandle == 0 )
+		return;
+	if ( m_nRustLifecycleHandle == ~(uint64)0 )
+	{
+		Warning( "Cannot shut down an app-system group from its lifecycle callback\n" );
+		return;
+	}
+	const uint64 handle = m_nRustLifecycleHandle;
+	m_nRustLifecycleHandle = ~(uint64)0;
+	const SourceAbiStatus status = source_rust_bridge_app_group_shutdown(
+		handle, RustLifecycleStep, this );
+	if ( status != SOURCE_ABI_OK )
+	{
+		// A rejected call did not consume the state; keep it for the owner.
+		m_nRustLifecycleHandle = handle;
+		Warning( "Rust split app-system shutdown rejected: status %d\n", status );
+		return;
+	}
+	m_nRustLifecycleHandle = 0;
+	s_pCurrentAppSystem = GetParent();
+	Msg( "Rust split app-system cleanup complete: stage %d\n", m_nErrorStage );
+#else
 	// The factory now uses this app system group
 	s_pCurrentAppSystem	= this;
 
@@ -489,6 +609,7 @@ destroy:
 
 	// Call an installed application destroy function
 	Destroy();
+#endif
 }
 
 

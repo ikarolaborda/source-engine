@@ -7,12 +7,12 @@
 //! materials exist nowhere else, so a map's world cannot be textured without
 //! reading this archive first.
 //!
-//! The archive is a plain ZIP. VBSP writes every entry stored rather than
-//! compressed, which is why only that method is read here; a compressed entry
-//! is reported rather than returned as the bytes it isn't.
+//! Supports the native Source reader's stored and LZMA (method 14) entries.
+//! Split, encrypted, ZIP64 and other compression formats are rejected.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{self, Write};
 
 /// `PK\x03\x04`, before each entry's own header.
 const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
@@ -25,14 +25,16 @@ const LOCAL_HEADER_SIZE: usize = 30;
 const CENTRAL_HEADER_SIZE: usize = 46;
 const END_OF_DIRECTORY_SIZE: usize = 22;
 
-/// The only compression method a map's pakfile uses.
 const METHOD_STORED: u16 = 0;
+const METHOD_LZMA: u16 = 14;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_entries: usize,
     pub max_entry_size: usize,
     pub max_name_length: usize,
+    pub max_archive_size: usize,
+    pub max_dictionary_size: usize,
 }
 
 impl Default for Limits {
@@ -41,6 +43,8 @@ impl Default for Limits {
             max_entries: 65_536,
             max_entry_size: 256 * 1024 * 1024,
             max_name_length: 1024,
+            max_archive_size: 512 * 1024 * 1024,
+            max_dictionary_size: 64 * 1024 * 1024,
         }
     }
 }
@@ -56,11 +60,61 @@ pub struct Entry {
     pub method: u16,
     /// Offset of this entry's local header within the archive.
     pub header_offset: u32,
+    flags: u16,
+    data_offset: usize,
 }
 
 impl Entry {
+    /// Validated payload offset relative to the start of the ZIP, not its BSP.
+    pub fn data_offset(&self) -> u64 {
+        self.data_offset as u64
+    }
+
     pub fn is_stored(&self) -> bool {
         self.method == METHOD_STORED
+    }
+}
+
+/// An owned, metadata-only index. Parsing does not retain or copy archive bytes.
+/// Entries have stable lexicographic indices, not collision-prone name hashes.
+#[derive(Debug)]
+pub struct Index {
+    entries: Vec<Entry>,
+}
+
+impl Index {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        let entries = Pak::parse_entries(bytes, Limits::default())?
+            .into_values()
+            // Native preload data is an optional cache, not a visible file.
+            .filter(|entry| entry.path != "__preload_section.pre")
+            .collect();
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn find(&self, path: &str) -> Option<usize> {
+        if path.starts_with(['/', '\\']) || path.contains(['\0', ':']) {
+            return None;
+        }
+        let path = path.replace('\\', "/").to_ascii_lowercase();
+        let mut parts = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                _ => parts.push(part),
+            }
+        }
+        let path = parts.join("/");
+        self.entries
+            .binary_search_by(|entry| entry.path.cmp(&path))
+            .ok()
     }
 }
 
@@ -69,6 +123,7 @@ impl Entry {
 pub struct Pak {
     entries: BTreeMap<String, Entry>,
     bytes: Vec<u8>,
+    max_dictionary_size: usize,
 }
 
 impl Pak {
@@ -77,26 +132,34 @@ impl Pak {
     }
 
     pub fn parse_with_limits(bytes: &[u8], limits: Limits) -> Result<Self> {
+        Ok(Self {
+            entries: Self::parse_entries(bytes, limits)?,
+            bytes: bytes.to_vec(),
+            max_dictionary_size: limits.max_dictionary_size,
+        })
+    }
+
+    fn parse_entries(bytes: &[u8], limits: Limits) -> Result<BTreeMap<String, Entry>> {
+        if bytes.len() > limits.max_archive_size {
+            return Err(Error::ArchiveTooLarge);
+        }
         // An empty lump is how a map with no embedded content states it,
         // which is not an error.
         if bytes.is_empty() {
-            return Ok(Self {
-                entries: BTreeMap::new(),
-                bytes: Vec::new(),
-            });
+            return Ok(BTreeMap::new());
         }
 
         let directory = find_end_of_directory(bytes)?;
+        if directory.count > limits.max_entries {
+            return Err(Error::TooManyEntries {
+                limit: limits.max_entries,
+            });
+        }
         let mut entries = BTreeMap::new();
         let mut at = directory.offset;
 
         for index in 0..directory.count {
-            if entries.len() >= limits.max_entries {
-                return Err(Error::TooManyEntries {
-                    limit: limits.max_entries,
-                });
-            }
-            let header = bytes
+            let header = bytes[..directory.end]
                 .get(at..at.checked_add(CENTRAL_HEADER_SIZE).ok_or(Error::Overflow)?)
                 .ok_or(Error::DirectoryTruncated { index })?;
             if read_u32(header, 0) != CENTRAL_HEADER_SIGNATURE {
@@ -104,6 +167,10 @@ impl Pak {
             }
 
             let method = read_u16(header, 10);
+            let flags = read_u16(header, 8);
+            if flags & !0x080a != 0 || read_u16(header, 34) != 0 {
+                return Err(Error::UnsupportedLayout);
+            }
             let crc32 = read_u32(header, 16);
             let compressed_length = read_u32(header, 20);
             let length = read_u32(header, 24);
@@ -129,11 +196,70 @@ impl Pak {
                 .ok_or(Error::DirectoryTruncated { index })?;
             let path =
                 normalize(std::str::from_utf8(raw).map_err(|_| Error::InvalidName { index })?);
+            if raw.starts_with(b"/")
+                || raw.starts_with(b"\\")
+                || path.contains(['\0', ':'])
+                || path
+                    .trim_end_matches('/')
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(Error::InvalidName { index });
+            }
 
             at = name_end
                 .checked_add(extra_length)
                 .and_then(|next| next.checked_add(comment_length))
                 .ok_or(Error::Overflow)?;
+            if at > directory.end {
+                return Err(Error::DirectoryTruncated { index });
+            }
+            if !matches!(method, METHOD_STORED | METHOD_LZMA) {
+                return Err(Error::UnsupportedMethod { path, method });
+            }
+            if method == METHOD_STORED && compressed_length != length {
+                return Err(Error::InvalidLocalHeader(path));
+            }
+            let offset = header_offset as usize;
+            let local = bytes[..directory.offset]
+                .get(
+                    offset
+                        ..offset
+                            .checked_add(LOCAL_HEADER_SIZE)
+                            .ok_or(Error::Overflow)?,
+                )
+                .ok_or_else(|| Error::EntryOutOfRange(path.clone()))?;
+            if read_u32(local, 0) != LOCAL_HEADER_SIGNATURE
+                || read_u16(local, 6) != flags
+                || read_u16(local, 8) != method
+            {
+                return Err(Error::InvalidLocalHeader(path));
+            }
+            // With a data descriptor, the central record supplies CRC/sizes.
+            if flags & 8 == 0
+                && (read_u32(local, 14) != crc32
+                    || read_u32(local, 18) != compressed_length
+                    || read_u32(local, 22) != length)
+            {
+                return Err(Error::InvalidLocalHeader(path));
+            }
+            let name_at = offset + LOCAL_HEADER_SIZE;
+            let name_end = name_at
+                .checked_add(read_u16(local, 26) as usize)
+                .ok_or(Error::Overflow)?;
+            if bytes.get(name_at..name_end) != Some(raw) {
+                return Err(Error::InvalidLocalHeader(path));
+            }
+            let data_offset = name_end
+                .checked_add(read_u16(local, 28) as usize)
+                .ok_or(Error::Overflow)?;
+            if data_offset
+                .checked_add(compressed_length as usize)
+                .ok_or(Error::Overflow)?
+                > directory.offset
+            {
+                return Err(Error::EntryOutOfRange(path));
+            }
 
             // A directory entry has no content and would otherwise shadow a
             // file lookup of the same name.
@@ -150,14 +276,18 @@ impl Pak {
                     length,
                     method,
                     header_offset,
+                    flags,
+                    data_offset,
                 },
             );
         }
+        if at != directory.end {
+            return Err(Error::InvalidDirectoryRecord {
+                index: directory.count,
+            });
+        }
 
-        Ok(Self {
-            entries,
-            bytes: bytes.to_vec(),
-        })
+        Ok(entries)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
@@ -203,50 +333,63 @@ impl Pak {
 
     /// The contents of one entry, checked against the CRC the archive
     /// recorded for it.
-    pub fn read(&self, path: &str) -> Result<&[u8]> {
+    pub fn read(&self, path: &str) -> Result<Vec<u8>> {
         let entry = self
             .entry(path)
             .ok_or_else(|| Error::MissingEntry(normalize(path)))?;
-        if !entry.is_stored() {
-            return Err(Error::UnsupportedMethod {
-                path: entry.path.clone(),
-                method: entry.method,
-            });
+        // All ranges and local/central agreement were validated at mount time.
+        let compressed =
+            &self.bytes[entry.data_offset..entry.data_offset + entry.compressed_length as usize];
+        entry.decode_payload(compressed, self.max_dictionary_size)
+    }
+}
+
+impl Entry {
+    /// Decode exactly this entry's compressed bytes, checking size, dictionary
+    /// bound and CRC. Shared by owned archives and file-backed index readers.
+    pub fn decode_payload(&self, compressed: &[u8], max_dictionary_size: usize) -> Result<Vec<u8>> {
+        let entry = self;
+        if compressed.len() != entry.compressed_length as usize
+            || !matches!(entry.method, METHOD_STORED | METHOD_LZMA)
+            || (entry.is_stored() && compressed.len() != entry.length as usize)
+        {
+            return Err(Error::InvalidCompressedData(entry.path.clone()));
         }
-
-        // The name and extra field of the local header are not required to
-        // match the central directory's, so the data offset is found by
-        // reading the local header rather than assuming either length.
-        let offset = entry.header_offset as usize;
-        let header = self
-            .bytes
-            .get(
-                offset
-                    ..offset
-                        .checked_add(LOCAL_HEADER_SIZE)
-                        .ok_or(Error::Overflow)?,
-            )
-            .ok_or_else(|| Error::EntryOutOfRange(entry.path.clone()))?;
-        if read_u32(header, 0) != LOCAL_HEADER_SIGNATURE {
-            return Err(Error::InvalidLocalHeader(entry.path.clone()));
-        }
-        let name_length = read_u16(header, 26) as usize;
-        let extra_length = read_u16(header, 28) as usize;
-
-        let start = offset
-            .checked_add(LOCAL_HEADER_SIZE)
-            .and_then(|at| at.checked_add(name_length))
-            .and_then(|at| at.checked_add(extra_length))
-            .ok_or(Error::Overflow)?;
-        let end = start
-            .checked_add(entry.length as usize)
-            .ok_or(Error::Overflow)?;
-        let data = self
-            .bytes
-            .get(start..end)
-            .ok_or_else(|| Error::EntryOutOfRange(entry.path.clone()))?;
-
-        let actual = source_vpk::crc32(data);
+        let data = if entry.is_stored() {
+            compressed.to_vec()
+        } else {
+            let bad = || Error::InvalidCompressedData(entry.path.clone());
+            if compressed.len() < 9
+                || read_u16(compressed, 2) != 5
+                || read_u32(compressed, 5) as usize > max_dictionary_size
+            {
+                return Err(bad());
+            }
+            let mut input = &compressed[4..]; // 5 properties, then raw LZMA
+            let mut output = BoundedOutput {
+                bytes: Vec::new(),
+                limit: entry.length as usize,
+            };
+            let options = lzma_rs::decompress::Options {
+                // ZIP bit 1 requires an end marker; otherwise size terminates it.
+                unpacked_size: lzma_rs::decompress::UnpackedSize::UseProvided(
+                    if entry.flags & 2 != 0 {
+                        None
+                    } else {
+                        Some(entry.length as u64)
+                    },
+                ),
+                memlimit: Some(max_dictionary_size),
+                allow_incomplete: false,
+            };
+            lzma_rs::lzma_decompress_with_options(&mut input, &mut output, &options)
+                .map_err(|_| bad())?;
+            if output.bytes.len() != entry.length as usize || !input.is_empty() {
+                return Err(bad());
+            }
+            output.bytes
+        };
+        let actual = source_vpk::crc32(&data);
         if actual != entry.crc32 {
             return Err(Error::CrcMismatch {
                 path: entry.path.clone(),
@@ -261,6 +404,28 @@ impl Pak {
 struct Directory {
     offset: usize,
     count: usize,
+    end: usize,
+}
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl Write for BoundedOutput {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if data.len() > self.limit - self.bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LZMA output exceeds ZIP size",
+            ));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn find_end_of_directory(bytes: &[u8]) -> Result<Directory> {
@@ -270,21 +435,32 @@ fn find_end_of_directory(bytes: &[u8]) -> Result<Directory> {
         .len()
         .checked_sub(END_OF_DIRECTORY_SIZE)
         .ok_or(Error::NoEndOfDirectory)?;
-    let found = (0..=start)
+    let found = (start.saturating_sub(u16::MAX as usize)..=start)
         .rev()
-        .find(|at| read_u32(bytes, *at) == END_OF_DIRECTORY_SIGNATURE)
+        .find(|at| {
+            read_u32(bytes, *at) == END_OF_DIRECTORY_SIGNATURE
+                && *at + END_OF_DIRECTORY_SIZE + read_u16(bytes, *at + 20) as usize == bytes.len()
+        })
         .ok_or(Error::NoEndOfDirectory)?;
 
     let record = &bytes[found..];
     let count = read_u16(record, 10) as usize;
     let size = read_u32(record, 12) as usize;
     let offset = read_u32(record, 16) as usize;
+    if read_u16(record, 4) != 0
+        || read_u16(record, 6) != 0
+        || read_u16(record, 8) as usize != count
+        || count == u16::MAX as usize
+        || size == u32::MAX as usize
+    {
+        return Err(Error::UnsupportedLayout);
+    }
 
     let end = offset.checked_add(size).ok_or(Error::Overflow)?;
-    if end > bytes.len() {
+    if end != found {
         return Err(Error::DirectoryOutOfRange { offset, size });
     }
-    Ok(Directory { offset, count })
+    Ok(Directory { offset, count, end })
 }
 
 /// Reduces a stored name to the one form a lookup uses.
@@ -318,6 +494,9 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    ArchiveTooLarge,
+    UnsupportedLayout,
+    InvalidCompressedData(String),
     NoEndOfDirectory,
     DirectoryOutOfRange {
         offset: usize,
@@ -342,8 +521,7 @@ pub enum Error {
     MissingEntry(String),
     EntryOutOfRange(String),
     InvalidLocalHeader(String),
-    /// A compressed entry. VBSP stores everything it embeds, so this means
-    /// the archive was written by something else.
+    /// A method other than stored or LZMA.
     UnsupportedMethod {
         path: String,
         method: u16,
@@ -359,6 +537,11 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ArchiveTooLarge => write!(f, "pakfile exceeds archive size limit"),
+            Self::UnsupportedLayout => write!(f, "unsupported split, encrypted or ZIP64 pakfile"),
+            Self::InvalidCompressedData(path) => {
+                write!(f, "invalid or excessive LZMA data in {path}")
+            }
             Self::NoEndOfDirectory => write!(f, "pakfile has no end-of-directory record"),
             Self::DirectoryOutOfRange { offset, size } => {
                 write!(
@@ -460,6 +643,61 @@ mod tests {
     }
 
     #[test]
+    fn detached_entry_decoder_checks_exact_payload_size_method_and_crc() {
+        let bytes = archive(&[("a.txt", b"payload")]);
+        let index = Index::parse(&bytes).unwrap();
+        let entry = &index.entries()[0];
+        assert_eq!(entry.decode_payload(b"payload", 1024).unwrap(), b"payload");
+        for data in [b"payloa".as_slice(), b"payload!", b"changed"] {
+            assert!(entry.decode_payload(data, 1024).is_err());
+        }
+        let mut modified = entry.clone();
+        modified.length += 1;
+        assert!(modified.decode_payload(b"payload", 1024).is_err());
+        modified.length = entry.length;
+        modified.method = 8;
+        assert!(modified.decode_payload(b"payload", 1024).is_err());
+    }
+
+    #[test]
+    fn metadata_index_owns_names_and_canonical_lookup_without_payloads() {
+        let mut bytes = archive(&[
+            ("__preload_section.pre", b"optional cache"),
+            ("Z/Second.vmt", b"two"),
+            ("A/First.vmt", b"one"),
+        ]);
+        let index = Index::parse(&bytes).unwrap();
+        assert_eq!(index.entries().len(), 2);
+        assert_eq!(index.find("a/./deeper/../FIRST.vmt"), Some(0));
+        assert_eq!(index.find("Z\\Second.vmt"), Some(1));
+        for path in [
+            "../a/first.vmt",
+            "/a/first.vmt",
+            "c:a/first.vmt",
+            "__preload_section.pre",
+        ] {
+            assert_eq!(index.find(path), None);
+        }
+        let entry = &index.entries()[0];
+        assert_eq!(&bytes[entry.data_offset() as usize..][..3], b"one");
+        bytes.fill(0);
+        drop(bytes);
+        assert_eq!(index.entries()[0].path, "a/first.vmt");
+        assert_eq!(index.find("A/FIRST.VMT"), Some(0));
+    }
+
+    #[test]
+    fn metadata_index_uses_last_canonical_duplicate_and_checks_bounds() {
+        let bytes = archive(&[("A.txt", b"old"), ("a.txt", b"new payload")]);
+        let index = Index::parse(&bytes).unwrap();
+        assert_eq!(index.entries().len(), 1);
+        assert_eq!(index.entries()[0].length, 11);
+        assert!(Index::parse(&bytes[..bytes.len() - 1]).is_err());
+        assert!(Index::parse(&[]).unwrap().entries().is_empty());
+        assert_eq!(Limits::default().max_archive_size, 512 * 1024 * 1024);
+    }
+
+    #[test]
     fn reads_the_entries_a_map_embeds() {
         let bytes = archive(&[
             ("materials/maps/test/brick_0_0_0.vmt", b"\"patch\" { }"),
@@ -547,15 +785,164 @@ mod tests {
             .expect("the directory is in the archive");
         bytes[at + 10..at + 12].copy_from_slice(&8u16.to_le_bytes());
 
-        let pak = Pak::parse(&bytes).unwrap();
         assert_eq!(
-            pak.read("a.vmt"),
-            Err(Error::UnsupportedMethod {
+            Pak::parse(&bytes).err(),
+            Some(Error::UnsupportedMethod {
                 path: "a.vmt".to_owned(),
                 method: 8,
             })
         );
-        assert!(!pak.entry("a.vmt").unwrap().is_stored());
+    }
+
+    fn lzma_fixture() -> Vec<u8> {
+        // Python 3 zipfile.ZIP_LZMA (liblzma), independent of lzma-rs.
+        // Payload: b"Rust owns this packed content. " * 32. ZIP bit 1 has EOS.
+        let hex = "504b03043f0002000e000756345ddc8b91053a000000e003000005000000612e766d74090405005d0000800000291d4a676c9b71390d2924e683ef35e403fac99f3b036583d8a4f1760229c2949df858761c56c577f0e7ffffd886f000504b01023f033f0002000e000756345ddc8b91053a000000e0030000050000000000000000000000800100000000612e766d74504b05060000000001000100330000005d0000000000";
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_independent_zip_lzma_and_rejects_bombs_and_truncation() {
+        let bytes = lzma_fixture();
+        let expected = b"Rust owns this packed content. ".repeat(32);
+        assert_eq!(Pak::parse(&bytes).unwrap().read("a.vmt").unwrap(), expected);
+        let at = 35;
+        for offset in [at + 2, at + 4, at + 15, at + 57] {
+            let mut damaged = bytes.clone();
+            damaged[offset] ^= 255;
+            assert!(
+                Pak::parse(&damaged).unwrap().read("a.vmt").is_err(),
+                "corruption at {offset}"
+            );
+        }
+        for length in [0u32, 1, 991, 993] {
+            let mut damaged = bytes.clone();
+            damaged[22..26].copy_from_slice(&length.to_le_bytes());
+            damaged[93 + 24..93 + 28].copy_from_slice(&length.to_le_bytes());
+            assert!(Pak::parse(&damaged).unwrap().read("a.vmt").is_err());
+        }
+        assert!(Pak::parse_with_limits(
+            &bytes,
+            Limits {
+                max_dictionary_size: 4096,
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .read("a.vmt")
+        .is_err());
+        // Each shorter declared compressed stream must fail, not expose a prefix.
+        for length in 0u32..58 {
+            let mut damaged = bytes.clone();
+            damaged[18..22].copy_from_slice(&length.to_le_bytes());
+            damaged[93 + 20..93 + 24].copy_from_slice(&length.to_le_bytes());
+            assert!(Pak::parse(&damaged).unwrap().read("a.vmt").is_err());
+        }
+    }
+
+    #[test]
+    fn reads_size_terminated_lzma_without_an_end_marker() {
+        for length in [0, 1, 4096] {
+            let data = vec![b'x'; length];
+            let mut compressed = vec![9, 4, 5, 0];
+            lzma_rs::lzma_compress_with_options(
+                &mut data.as_slice(),
+                &mut compressed,
+                &lzma_rs::compress::Options {
+                    unpacked_size: lzma_rs::compress::UnpackedSize::SkipWritingToHeader,
+                },
+            )
+            .unwrap();
+            let original = archive(&[("a.vmt", &data)]);
+            let old_cd = 35 + data.len();
+            let mut zip = original[..35].to_vec();
+            zip.extend_from_slice(&compressed);
+            let cd = zip.len();
+            zip.extend_from_slice(&original[old_cd..]);
+            zip[8..10].copy_from_slice(&METHOD_LZMA.to_le_bytes());
+            zip[18..22].copy_from_slice(&(compressed.len() as u32).to_le_bytes());
+            zip[cd + 10..cd + 12].copy_from_slice(&METHOD_LZMA.to_le_bytes());
+            zip[cd + 20..cd + 24].copy_from_slice(&(compressed.len() as u32).to_le_bytes());
+            let end = zip.len() - END_OF_DIRECTORY_SIZE;
+            zip[end + 16..end + 20].copy_from_slice(&(cd as u32).to_le_bytes());
+            assert_eq!(Pak::parse(&zip).unwrap().read("a.vmt").unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn validates_directory_layout_names_flags_and_local_agreement() {
+        for name in ["../a", "/a", "a/../b", "a//b", "C:/a", "a\0b", "./a"] {
+            assert!(matches!(
+                Pak::parse(&archive(&[(name, b"x")])),
+                Err(Error::InvalidName { .. })
+            ));
+        }
+        let bytes = archive(&[("a.vmt", b"data")]);
+        let end = bytes.len() - 22;
+        let cd = read_u32(&bytes, end + 16) as usize;
+        for at in [
+            6,
+            8,
+            14,
+            18,
+            22,
+            26,
+            cd + 8,
+            cd + 20,
+            cd + 30,
+            cd + 34,
+            end + 4,
+            end + 6,
+            end + 8,
+            end + 12,
+            end + 20,
+        ] {
+            let mut bad = bytes.clone();
+            bad[at] ^= 1;
+            assert!(Pak::parse(&bad).is_err(), "field at {at}");
+        }
+        // Signatures inside comments cannot be mistaken for the real EOCD.
+        let mut commented = bytes.clone();
+        commented[end + 20..end + 22].copy_from_slice(&24u16.to_le_bytes());
+        commented.extend_from_slice(&END_OF_DIRECTORY_SIGNATURE.to_le_bytes());
+        commented.extend_from_slice(&[0; 20]);
+        assert_eq!(
+            Pak::parse(&commented).unwrap().read("a.vmt").unwrap(),
+            b"data"
+        );
+        // Descriptor mode uses directory sizes and CRC, not local placeholders.
+        let mut descriptor = bytes.clone();
+        descriptor[6] = 8;
+        descriptor[cd + 8] = 8;
+        descriptor[14..26].fill(0);
+        assert_eq!(
+            Pak::parse(&descriptor).unwrap().read("a.vmt").unwrap(),
+            b"data"
+        );
+        assert!(matches!(
+            Pak::parse_with_limits(
+                &bytes,
+                Limits {
+                    max_archive_size: 1,
+                    ..Default::default()
+                }
+            ),
+            Err(Error::ArchiveTooLarge)
+        ));
+        // Count directory records too; skipping folders must not bypass limits.
+        assert!(matches!(
+            Pak::parse_with_limits(
+                &archive(&[("a/", b""), ("a/", b"")]),
+                Limits {
+                    max_entries: 1,
+                    ..Default::default()
+                }
+            ),
+            Err(Error::TooManyEntries { .. })
+        ));
     }
 
     #[test]
