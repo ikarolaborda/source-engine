@@ -110,6 +110,10 @@ randomized ABI/fuzz checks for filter-before-dedup order, replay, signed IDs,
 released input memory, concurrency and handle lifetimes. Mount registration,
 store-ID assignment, platform exclusion inputs and trust still remain native.
 
+For the installed manual-play fixes and remaining work, see
+[the 2026-09-20 handoff](handoff-2026-09-20.md). It records the final incremental
+install and distinguishes the lightmap regression check from gameplay proof.
+
 The live ordered mount table and iterator snapshot tables now also belong to
 Rust, including lifetime control for temporary native path objects through
 clone/drop callbacks. C++ ordered vectors are excluded from Rust builds;

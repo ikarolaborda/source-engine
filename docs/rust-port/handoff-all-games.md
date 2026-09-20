@@ -1,5 +1,9 @@
 # Handoff: a full Rust port presenting through Metal, for every Source game in this tree
 
+**Latest installed checkpoint and next-session instructions:**
+[handoff-2026-09-20.md](handoff-2026-09-20.md). The historical baseline below
+remains useful, but does not override the latest installation status.
+
 Written 2026-09-19 on branch `rust-port`, with the work of that day
 uncommitted in the tree. It continues from [`handoff.md`](handoff.md) and
 [`d3d9-metal.md`](d3d9-metal.md).
