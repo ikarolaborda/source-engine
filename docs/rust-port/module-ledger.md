@@ -176,11 +176,25 @@ was small and the transcription was the risk. Deriving the enum bounds from
 down is what makes a mistranscribed table a build failure instead of a wrong
 key binding.
 
-Known divergence, recorded rather than hidden: the C++ reads
-`joy_axisbutton_threshold`, `joy_axis_deadzone` and `joy_gamecontroller_config`
-as convars. Reading those needs the cvar interface, which is `vstdlib`, which
-is C++. The Rust module compiles the first two defaults in and does not pass
-the third to SDL at all, so a player who has changed either threshold, or who
-relies on a custom controller mapping set through that convar rather than
-through Steam, gets the default instead. Wiring `ICvar` in through the factory
-by vtable slot is the fix, and it is the next thing this module wants.
+The convars it reads were briefly a divergence and are not one now. The first
+cut compiled `joy_axisbutton_threshold` and `joy_axis_deadzone` defaults in and
+dropped `joy_gamecontroller_config`, on the reasoning that reading a convar
+needs `ICvar`, which is `vstdlib`, which is C++. That reasoning was wrong in
+the same way the `soundemittersystem` container estimate was wrong: `ICvar` is
+an interface reached through the factory, exactly like `ILauncherMgr`, so it
+costs a slot call and not a link. The module now reads all four convars the
+C++ reads and writes the two it writes, and still exports one symbol and links
+only `libSystem`.
+
+One thing is genuinely weaker there than anywhere else in these ports, and is
+worth knowing before the next module copies the pattern. `ConVar::GetFloat`
+and `GetString` are `FORCEINLINE_CVAR`: they read fields out of the object
+rather than calling a virtual, so there is no vtable to borrow and what crosses
+the boundary is a *layout*. The offsets are measured with
+`clang -Xclang -fdump-record-layouts` rather than read off the header, and
+`Cvar::find` then proves them at runtime by reading the convar's name back out
+of the object at the offset it expects and comparing it with the name it asked
+for. A layout that ever moves therefore fails one lookup with one warning and
+falls back to the compiled defaults, instead of quietly returning a float from
+the middle of some other field. Writing needs none of that: `IConVar` really
+does declare `SetValue` virtual.

@@ -108,6 +108,8 @@ pub type EventFilter = unsafe extern "C" fn(*mut c_void, *mut Event) -> c_int;
 pub struct Sdl {
     init_subsystem: unsafe extern "C" fn(u32) -> c_int,
     quit_subsystem: unsafe extern "C" fn(u32),
+    set_hint: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int,
+    game_controller_add_mapping: unsafe extern "C" fn(*const c_char) -> c_int,
     get_error: unsafe extern "C" fn() -> *const c_char,
     add_event_watch: unsafe extern "C" fn(EventFilter, *mut c_void),
     del_event_watch: unsafe extern "C" fn(EventFilter, *mut c_void),
@@ -137,6 +139,8 @@ pub fn sdl() -> Option<&'static Sdl> {
             Some(Sdl {
                 init_subsystem: resolve(b"SDL_InitSubSystem\0")?,
                 quit_subsystem: resolve(b"SDL_QuitSubSystem\0")?,
+                set_hint: resolve(b"SDL_SetHint\0")?,
+                game_controller_add_mapping: resolve(b"SDL_GameControllerAddMapping\0")?,
                 get_error: resolve(b"SDL_GetError\0")?,
                 add_event_watch: resolve(b"SDL_AddEventWatch\0")?,
                 del_event_watch: resolve(b"SDL_DelEventWatch\0")?,
@@ -187,6 +191,28 @@ impl Sdl {
     }
 
 
+
+    /// `SDL_SetHint` for `SDL_HINT_GAMECONTROLLERCONFIG`, which SDL only
+    /// reads while it initialises the game-controller subsystem, so this is
+    /// only useful before [`Self::init_subsystem`].
+    pub fn set_controller_config_hint(&self, mappings: &CStr) {
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe {
+            (self.set_hint)(c"SDL_GAMECONTROLLERCONFIG".as_ptr(), mappings.as_ptr());
+        }
+    }
+
+    /// `SDL_GameControllerAddMapping`, which unlike the hint above takes
+    /// effect whenever it is called: SDL re-emits a device-added event for a
+    /// controller already plugged in whose mapping this changes. That is what
+    /// lets a mapping change after startup be applied without tearing the
+    /// subsystem down and standing it back up, which is what the C++ has to do.
+    ///
+    /// Answers true when SDL accepted the row.
+    pub fn add_controller_mapping(&self, mapping: &CStr) -> bool {
+        // SAFETY: the string is NUL-terminated and outlives the call.
+        unsafe { (self.game_controller_add_mapping)(mapping.as_ptr()) >= 0 }
+    }
 
     /// `SDL_GetError`.
     pub fn error(&self) -> String {

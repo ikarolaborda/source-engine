@@ -962,11 +962,30 @@ derived enum arithmetic is what makes it tolerable. What it does not cover at
 all — the polling loop against a real launcher, the watches against a real
 device — is a play test.
 
-One divergence, recorded rather than hidden: the C++ reads
-`joy_axisbutton_threshold`, `joy_axis_deadzone` and `joy_gamecontroller_config`
-as convars, which needs the cvar interface, which is `vstdlib`, which is C++.
-The Rust module compiles the first two defaults in and does not pass the third
-to SDL, so a player who changed either threshold, or who relies on a controller
-mapping set through that convar rather than through Steam, gets the default.
-Reaching `ICvar` through the factory by vtable slot is the fix and is what this
-module wants next.
+The convars come through `ICvar`, which is reached the same way
+`ILauncherMgr` is: `VEngineCvar004` from the factory, then slot calls. So
+`joy_axisbutton_threshold` and `joy_axis_deadzone` are read at the moment they
+are used, as the C++ reads them; `joystick` gates rumble; and the module sets
+`joy_xcontroller_found` and `joystick` when a pad is found, which is what makes
+the game re-exec its controller config. None of that costs a link: the module
+still exports one symbol and links only `libSystem`.
+
+`joy_gamecontroller_config` is the interesting one. The C++ passes it to SDL as
+`SDL_HINT_GAMECONTROLLERCONFIG`, which SDL reads only while the game-controller
+subsystem starts, so a change afterwards forces it to shut the subsystem down
+and stand it back up. This module sets the hint before init the same way, and
+then handles later changes with `SDL_GameControllerAddMapping` instead, which
+takes effect whenever it is called and makes SDL re-emit a device-added event
+for a controller already plugged in whose mapping changed. The teardown is not
+needed. The change arrives through `ICvar::InstallGlobalChangeCallback` — one
+global callback filtered by name, rather than owning the convar to get its own.
+
+The weak point, said plainly because it is the weakest thing in these four
+ports: `ConVar::GetFloat` and `GetString` are `FORCEINLINE_CVAR`, so they read
+fields out of the object instead of calling a virtual, and what this module
+depends on there is a *layout*. The offsets are measured with
+`-fdump-record-layouts`, and `Cvar::find` proves them at runtime by reading the
+convar's name back out at the offset it expects and comparing it with the name
+it asked for. A layout that moves fails one lookup with one warning and falls
+back to the compiled defaults rather than returning a float from the middle of
+some other field.

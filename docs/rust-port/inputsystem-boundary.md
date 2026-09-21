@@ -57,15 +57,15 @@ callers gate on `GetEventCount()`.
 ## The slots
 
 `self` = module state only. `launcher` = a slot call on `ILauncherMgr`.
-`sdl` = an SDL call. All 57 run on the thread that pumps, which is the main
+`cvar` = a read or a slot call through `ICvar`. `sdl` = an SDL call. All 57 run on the thread that pumps, which is the main
 thread; the SDL watches are invoked synchronously from inside that pump.
 
 | # | Slot | In → out | Touches | Notes |
 | --- | --- | --- | --- | --- |
-| 0 | `Connect` | factory → bool | launcher | Takes `SDLMgrInterface001`. Must not hold the state lock across the factory call: `CAppSystemGroup::FindSystem` sweeps `QueryInterface` over every system, this one included. |
+| 0 | `Connect` | factory → bool | launcher, cvar | Takes `SDLMgrInterface001`. Must not hold the state lock across the factory call: `CAppSystemGroup::FindSystem` sweeps `QueryInterface` over every system, this one included. |
 | 1 | `Disconnect` | — | self | |
 | 2 | `QueryInterface` | name → ptr | self | Exact match on `InputSystemVersion001`. |
-| 3 | `Init` | → `InitReturnVal_t` | self, sdl | Startup tick, key tables, touch + joystick subsystems. Steam block dead (§2). |
+| 3 | `Init` | → `InitReturnVal_t` | self, sdl, cvar | Startup tick, key tables, touch + joystick subsystems, and `joy_gamecontroller_config` to SDL's hint before the subsystem starts. Steam block dead (§2). |
 | 4 | `Shutdown` | — | sdl | `SDL_QuitSubSystem` for what `Init` took. |
 | 5 | `AttachToWindow` | `void*` → — | self | POSIX: records the handle, clears input state. No wndproc. |
 | 6 | `DetachFromWindow` | — | self | `ResetInputState` then forget the handle. |
@@ -83,7 +83,7 @@ thread; the SDL watches are invoked synchronously from inside that pump.
 | 20 | `EnableJoystickInput` | int, bool | self | |
 | 21 | `EnableJoystickDiagonalPOV` | int, bool | self | |
 | 22 | `SampleDevices` | — | self, sdl | Updates the sample tick; joystick polling is empty here, Steam polling dead. |
-| 23 | `SetRumble` | f, f, int | sdl | `SDL_HapticRumblePlay`/`Stop`, gated on the `joystick` convar. |
+| 23 | `SetRumble` | f, f, int | sdl, cvar | `SDL_HapticRumblePlay`/`Stop`, gated on the `joystick` convar. |
 | 24 | `StopRumble` | — | sdl | Four `SetRumble(0,0,i)`. |
 | 25 | `ResetInputState` | — | self | Releases every button (posting events), zeroes analog, clears raw accumulators. |
 | 26 | `SetPrimaryUserId` | int | self | |
@@ -177,3 +177,58 @@ lookups, all 128 scan codes against both extended-bit values, and every Steam
 slot — and was then deleted, because the goal of this project is Rust and the
 harness was C++. The result is recorded here because it is evidence, and the
 fact that it is no longer re-runnable is recorded with it.
+
+## The convars, and why reaching them costs no link
+
+The first cut of this port carried one divergence: the C++ reads
+`joy_axisbutton_threshold`, `joy_axis_deadzone`, `joy_gamecontroller_config`
+and `joystick`, and writes `joy_xcontroller_found` and `joystick`, and the
+Rust module compiled two defaults in and dropped the rest. The reasoning was
+that reading a convar needs `ICvar`, which is `vstdlib`, which is C++.
+
+That was wrong in the same shape as the `soundemittersystem` estimate about
+containers. `ICvar` is `VEngineCvar004`, an interface the factory hands out
+like any other, so it costs slot calls and not a link. The module now does all
+six and still exports one symbol and links only `libSystem`.
+
+What it needs, measured the way everything else here was:
+
+| Thing | Where | Measured with |
+| --- | --- | --- |
+| `ICvar::FindVar` | callable slot 12 | `-fdump-vtable-layouts` |
+| `ICvar::InstallGlobalChangeCallback` | 18 | same |
+| `ICvar::RemoveGlobalChangeCallback` | 19 | same |
+| `IConVar::SetValue( float )` | 1 | same |
+| `IConVar::GetName` | 3 | same |
+| `ConCommandBase::m_pszName` | offset 24 | `-fdump-record-layouts` |
+| `ConCommandBase::m_nFlags` | 40 | same |
+| the `IConVar` base | 48 | same |
+| `ConVar::m_pParent` | 56 | same |
+| `ConVar::m_pszString` | 72 | same |
+| `ConVar::m_fValue` | 84 | same |
+
+The offsets are there because `ConVar::GetFloat` and `GetString` are
+`FORCEINLINE_CVAR` — they read fields straight out of the object, so there is
+no virtual to borrow and what crosses the boundary is a layout rather than a
+vtable. That is the weakest dependency anywhere in these four ports, and it is
+checked rather than trusted: `Cvar::find` reads the convar's name back out of
+the object at the offset it expects and compares it with the name it asked
+for. A layout that ever moves fails that one lookup, says so once, and every
+reader falls back to the value the C++ declares the convar with. It cannot
+quietly return a float from the middle of some other field.
+
+`joy_gamecontroller_config` is handled better than the C++ handles it rather
+than the same way. The C++ passes it as `SDL_HINT_GAMECONTROLLERCONFIG`, which
+SDL reads only while the game-controller subsystem starts, so its change
+callback has to shut the subsystem down and stand it back up. This module sets
+the hint before init as well, and then applies later changes with
+`SDL_GameControllerAddMapping`, which takes effect whenever it is called and
+makes SDL re-emit a device-added event for an attached controller whose
+mapping changed — so the hotplug path picks it up and nothing is torn down.
+The change reaches the module through `ICvar::InstallGlobalChangeCallback`,
+one global callback filtered by name, because reaching a single convar's own
+callback would mean owning the convar.
+
+No convar is cached: the thresholds are read at the moment they are used, as
+the C++ reads them, so a change is picked up by the next axis event with
+nothing to re-register.

@@ -6,6 +6,11 @@
 
 use std::ffi::CString;
 
+/// Writes one line to the engine's console.
+pub fn message(message: &str) {
+    emit(c"Msg", message);
+}
+
 /// Writes one line to the engine's console as a warning.
 pub fn warning(message: &str) {
     emit(c"Warning", message);

@@ -25,9 +25,11 @@
 //!   caller posts between frames lands in `QUEUED` and cannot move the buffer
 //!   the engine is still reading.
 
+mod cvar;
 mod launcher;
 mod sdl;
 
+use cvar::{ConVar, Cvar};
 use launcher::{CocoaEvent, LauncherMgr, EVENT_BATCH};
 use source_cppabi::appsystem::{AppSystemMethods, InitReturnVal};
 use source_cppabi::{create_interface, guard, tier0, CreateInterfaceFn, Object, VTable};
@@ -194,9 +196,49 @@ impl Joystick {
     }
 }
 
+/// The convars the C++ module reads or writes, looked up once at `Connect`.
+///
+/// Each is optional because a dedicated server never registers them, which is
+/// ordinary rather than a failure; every reader falls back to the value the
+/// C++ declares the convar with.
+#[derive(Debug, Clone, Copy, Default)]
+struct Convars {
+    /// `joy_axisbutton_threshold`, default 0.3.
+    axis_button_threshold: Option<ConVar>,
+    /// `joy_axis_deadzone`, default 0.2.
+    axis_dead_zone: Option<ConVar>,
+    /// `joy_gamecontroller_config`, default empty.
+    gamecontroller_config: Option<ConVar>,
+    /// `joystick`, which gates rumble and is set when a pad is found.
+    joystick: Option<ConVar>,
+    /// `joy_xcontroller_found`, which this module owns and the game reads to
+    /// decide whether to re-exec its controller config.
+    xcontroller_found: Option<ConVar>,
+}
+
+impl Convars {
+    /// `joy_axisbutton_threshold` scaled the way `JoystickAxisMotion` scales
+    /// it, or the convar's own default when there is no cvar system.
+    fn axis_button_threshold(&self) -> i32 {
+        let fraction = self
+            .axis_button_threshold
+            .and_then(|var| var.float())
+            .unwrap_or(0.3);
+        (fraction * 32767.0) as i32
+    }
+
+    /// `joy_axis_deadzone`, likewise.
+    fn axis_dead_zone(&self) -> i32 {
+        let fraction = self.axis_dead_zone.and_then(|var| var.float()).unwrap_or(0.2);
+        (fraction * 32767.0) as i32
+    }
+}
+
 struct Module {
     core: InputCore,
     launcher: Option<LauncherMgr>,
+    cvar: Option<Cvar>,
+    convars: Convars,
     joystick: Joystick,
     watches_registered: bool,
 }
@@ -204,6 +246,14 @@ struct Module {
 static STATE: Mutex<Module> = Mutex::new(Module {
     core: InputCore::new(),
     launcher: None,
+    cvar: None,
+    convars: Convars {
+        axis_button_threshold: None,
+        axis_dead_zone: None,
+        gamecontroller_config: None,
+        joystick: None,
+        xcontroller_found: None,
+    },
     joystick: Joystick::none(),
     watches_registered: false,
 });
@@ -234,20 +284,138 @@ unsafe extern "C" fn connect(_: *mut This, factory: Option<CreateInterfaceFn>) -
         // so a lock held here would be entered again from inside the call.
         // SAFETY: the group gives a factory that takes a name and a return
         // code, and a null return code is allowed.
-        let found = unsafe {
-            factory(
-                launcher::INTERFACE_VERSION.as_ptr(),
-                std::ptr::null_mut::<c_int>(),
+        let (launcher_object, cvar_object) = unsafe {
+            (
+                factory(
+                    launcher::INTERFACE_VERSION.as_ptr(),
+                    std::ptr::null_mut::<c_int>(),
+                ),
+                factory(
+                    cvar::INTERFACE_VERSION.as_ptr(),
+                    std::ptr::null_mut::<c_int>(),
+                ),
             )
         };
-        state().launcher = LauncherMgr::new(found);
+
+        let cvar = Cvar::new(cvar_object);
+        let convars = cvar.map_or_else(Convars::default, |cvar| Convars {
+            axis_button_threshold: cvar.find(c"joy_axisbutton_threshold"),
+            axis_dead_zone: cvar.find(c"joy_axis_deadzone"),
+            gamecontroller_config: cvar.find(c"joy_gamecontroller_config"),
+            joystick: cvar.find(c"joystick"),
+            xcontroller_found: cvar.find(c"joy_xcontroller_found"),
+        });
+
+        {
+            let mut module = state();
+            module.launcher = LauncherMgr::new(launcher_object);
+            module.cvar = cvar;
+            module.convars = convars;
+        }
+
+        // A mapping changed after startup has to reach SDL, which is what the
+        // C++ uses this convar's own change callback for. There is one global
+        // callback here instead, filtered by name, because reaching a single
+        // convar's callback would mean owning the convar.
+        if let Some(cvar) = cvar {
+            // SAFETY: the callback is a `'static` function in this module and
+            // is removed in `Disconnect`, before the module can be unloaded.
+            unsafe { cvar.install_change_callback(convar_changed) };
+        }
         true
     })
 }
 
+/// `ICvar`'s global change callback: every convar the engine sets comes
+/// through here, so the first thing to do is ask which one.
+unsafe extern "C" fn convar_changed(
+    iconvar: *mut c_void,
+    _old_value: *const c_char,
+    _old_float: f32,
+) {
+    guard((), || {
+        // SAFETY: the engine passes the `IConVar` subobject of a live convar.
+        let Some(name) = (unsafe { cvar::changed_name(iconvar) }) else {
+            return;
+        };
+        if name != c"joy_gamecontroller_config" {
+            // The thresholds need nothing done: they are read at the moment
+            // they are used, so a change is picked up by the next axis event.
+            return;
+        }
+        apply_controller_config();
+    });
+}
+
+/// Hands `joy_gamecontroller_config` to SDL a row at a time.
+///
+/// `SDL_GameControllerAddMapping` takes effect whenever it is called and
+/// re-emits a device-added event for a controller already plugged in whose
+/// mapping changed, so a mapping set after startup lands without the
+/// shutdown-and-reinitialise the C++ has to do — it uses the hint, which SDL
+/// reads only while the subsystem starts.
+fn apply_controller_config() {
+    let Some(sdl) = sdl::sdl() else {
+        return;
+    };
+    let config = state().convars.gamecontroller_config;
+    let Some(config) = config.and_then(|var| var.string()) else {
+        return;
+    };
+    if config.is_empty() {
+        return;
+    }
+
+    // The convar holds newline-delimited rows, and SDL takes one per call.
+    let mut added = 0;
+    for row in config.to_bytes().split(|byte| *byte == b'\n') {
+        let row = trim_ascii(row);
+        if row.is_empty() {
+            continue;
+        }
+        let Ok(row) = std::ffi::CString::new(row) else {
+            continue;
+        };
+        if sdl.add_controller_mapping(&row) {
+            added += 1;
+        } else {
+            tier0::warning(&format!(
+                "joy_gamecontroller_config: SDL refused a mapping: {}\n",
+                sdl.error()
+            ));
+        }
+    }
+    if added > 0 {
+        tier0::message(&format!(
+            "Passed {added} controller mapping(s) from joy_gamecontroller_config to SDL.\n"
+        ));
+    }
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |at| at + 1);
+    &bytes[start..end]
+}
+
 unsafe extern "C" fn disconnect(_: *mut This) {
     guard((), || {
-        state().launcher = None;
+        // The callback must go before the module can be unloaded, or the
+        // engine keeps a pointer into a library that is no longer there.
+        let cvar = state().cvar;
+        if let Some(cvar) = cvar {
+            cvar.remove_change_callback(convar_changed);
+        }
+        let mut module = state();
+        module.launcher = None;
+        module.cvar = None;
+        module.convars = Convars::default();
     });
 }
 
@@ -706,9 +874,17 @@ fn set_rumble_impl(strength: f32) {
         return;
     }
 
+    // A player who turned the gamepad off in the options must not feel it,
+    // whatever the game asks for. Without a cvar system there is nothing to
+    // have turned off, so rumble is allowed.
+    let enabled = module
+        .convars
+        .joystick
+        .is_none_or(|var| var.bool().unwrap_or(true));
+
     // Below a hundredth, stop rather than play: SDL treats a zero strength as
     // an error rather than as silence.
-    if strength < 0.01 {
+    if strength < 0.01 || !enabled {
         if joystick.rumble_enabled {
             // SAFETY: the handle came from `open_rumble` and is still open.
             unsafe { sdl.rumble_stop(joystick.haptic) };
@@ -740,6 +916,19 @@ fn initialize_joysticks() {
     };
     if state().core.joystick_initialized {
         shutdown_joysticks();
+    }
+
+    // SDL reads this hint only while the subsystem starts, so it goes first.
+    // A change after this point is handled by `apply_controller_config`.
+    let config = state().convars.gamecontroller_config;
+    if let Some(mappings) = config.and_then(|var| var.string()) {
+        if !mappings.is_empty() {
+            tier0::message(&format!(
+                "Passing joy_gamecontroller_config to SDL ('{}').\n",
+                mappings.to_string_lossy()
+            ));
+            sdl.set_controller_config_hint(mappings);
+        }
     }
 
     if !sdl.init_subsystem(sdl::INIT_GAMECONTROLLER | sdl::INIT_HAPTIC) {
@@ -860,6 +1049,24 @@ fn hotplug_added(index: c_int) {
     module.core.enable_joystick_input(0, true);
     module.core.joystick_count = 1;
     module.core.x_controller = true;
+    let convars = module.convars;
+    drop(module);
+    set_xcontroller_found(&convars, true);
+}
+
+/// `SetJoyXControllerFound`. The game watches `joy_xcontroller_found` to know
+/// whether to re-exec its controller config, so the module has to set it, and
+/// finding a pad also turns `joystick` on.
+fn set_xcontroller_found(convars: &Convars, found: bool) {
+    if let Some(var) = convars.xcontroller_found {
+        var.set_float(f32::from(u8::from(found)));
+    }
+    // Losing a pad does not turn the setting off, only finding one turns it on.
+    if found {
+        if let Some(var) = convars.joystick {
+            var.set_float(1.0);
+        }
+    }
 }
 
 fn hotplug_removed(joystick_id: i32) {
@@ -871,11 +1078,13 @@ fn hotplug_removed(joystick_id: i32) {
         return;
     }
     let joystick = module.joystick;
+    let convars = module.convars;
     module.joystick = Joystick::none();
     module.core.joystick_count = 0;
     module.core.x_controller = false;
     module.core.enable_joystick_input(0, false);
     drop(module);
+    set_xcontroller_found(&convars, false);
 
     if !joystick.controller.is_null() {
         // SAFETY: both handles were opened here and are being given up.
@@ -935,18 +1144,17 @@ fn axis_motion(event: &sdl::Event) {
     let Some((code, button)) = state::controller_axis(axis) else {
         return;
     };
-    // The thresholds are the `joy_axisbutton_threshold` and `joy_axis_deadzone`
-    // convars' defaults. Reading the live values would mean linking `vstdlib`,
-    // which would put C++ back in this module; the defaults are what a player
-    // who has not changed them gets, which is everyone by default.
-    const AXIS_BUTTON_THRESHOLD: i32 = (0.3 * 32767.0) as i32;
-    const AXIS_DEAD_ZONE: i32 = (0.2 * 32767.0) as i32;
+    // Read at the moment they are used, as the C++ reads them, so a player
+    // changing either convar sees it on the next axis event with nothing to
+    // re-register.
+    let threshold = module.convars.axis_button_threshold();
+    let dead_zone = module.convars.axis_dead_zone();
     module.core.joystick_axis_motion(
         code,
         i32::from(event.axis_value()),
         button,
-        AXIS_BUTTON_THRESHOLD,
-        AXIS_DEAD_ZONE,
+        threshold,
+        dead_zone,
     );
 }
 
@@ -1132,6 +1340,39 @@ pub unsafe extern "C" fn CreateInterface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_thresholds_fall_back_to_the_convars_own_defaults() {
+        // A dedicated server registers none of these, and so does a test.
+        // The numbers are the ones the C++ declares the convars with, scaled
+        // the way JoystickAxisMotion scales them.
+        let none = Convars::default();
+        assert_eq!(none.axis_button_threshold(), (0.3 * 32767.0) as i32);
+        assert_eq!(none.axis_dead_zone(), (0.2 * 32767.0) as i32);
+    }
+
+    #[test]
+    fn controller_config_rows_are_split_and_trimmed_the_way_sdl_wants_them() {
+        // The convar holds newline-delimited rows and SDL takes one per call,
+        // so blank lines and stray carriage returns must not become mappings.
+        let config = "  row one  \n\n\r\nrow two\n   \n";
+        let rows: Vec<&[u8]> = config
+            .as_bytes()
+            .split(|byte| *byte == b'\n')
+            .map(trim_ascii)
+            .filter(|row| !row.is_empty())
+            .collect();
+        assert_eq!(rows, vec![b"row one".as_slice(), b"row two".as_slice()]);
+    }
+
+    #[test]
+    fn trimming_handles_the_edges_without_panicking() {
+        assert_eq!(trim_ascii(b""), b"");
+        assert_eq!(trim_ascii(b"   "), b"");
+        assert_eq!(trim_ascii(b"\r\n\t "), b"");
+        assert_eq!(trim_ascii(b"x"), b"x");
+        assert_eq!(trim_ascii(b" \tx y\r "), b"x y");
+    }
 
     #[test]
     fn the_table_has_the_fifty_seven_slots_the_interface_declares() {
