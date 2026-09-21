@@ -46,11 +46,25 @@ that loads anything goes through it until that is ported.
 | `scenefilecache` | `scenefilecache/SceneFileCache.cpp` | `rust/crates/source-scenefilecache`, `source_scene::cache`, `source_compress::lzma` | `rust/verify_scenefilecache.sh` | 2026-09-20 |
 | `soundemittersystem` | `soundemittersystem/soundemittersystembase.cpp`, `public/SoundParametersInternal.cpp`, `game/shared/interval.cpp` | `rust/crates/source-soundemittersystem`, `rust/crates/source-soundemitter`, `source-keyvalues` | `rust/verify_soundemitter.sh` | 2026-09-20 |
 | `stub_steam` | `stub_steam/steam_api.cpp` | `rust/crates/source-steamapi` | `rust/verify_steam_api.sh` | 2026-09-20 |
+| `inputsystem` | `inputsystem/inputsystem.cpp`, `key_translation.cpp`, `steamcontroller.cpp`, `joystick_sdl.cpp`, `touch_sdl.cpp` | `rust/crates/source-inputsystem`, `rust/crates/source-input` | `cargo test -p source-inputsystem` | 2026-09-21 |
 
-The first two also drop the module's copy of `public/tier0/memoverride.cpp`;
-`stub_steam` had only its one translation unit. All three are dropped on macOS
-only; other platforms still build the C++ module, because the gates have only
-run here and the table layouts they rely on are clang's.
+`scenefilecache`, `soundemittersystem` and `inputsystem` also drop the module's
+copy of `public/tier0/memoverride.cpp`; `stub_steam` had only its one
+translation unit. All four are dropped on macOS only; other platforms still
+build the C++ module, because the gates have only run here and the table
+layouts they rely on are clang's.
+
+`inputsystem` is the first whose gate is written in Rust rather than as a C++
+oracle. `rust/crates/source-inputsystem/tests/module.rs` `dlopen`s the built
+library, takes its interface through `CreateInterface` and calls every slot by
+index off the vtable, which is what a wrong slot number would break; the tables
+behind those slots are checked in `source-input`'s own tests. That is weaker
+than the differential gates above in one specific way, and it is worth being
+plain about it: those compare against the C++ module's answers, and this
+compares against what the port was written to produce. The enum arithmetic is
+what makes that tolerable here — it is derived, not transcribed, and the
+`BUTTON_CODE_LAST` and `ANALOG_CODE_LAST` assertions the C++ makes at compile
+time are reproduced, so a table of the wrong length fails to build.
 
 `stub_steam` is the first of the three that something else *links*. The other
 two are found through `CreateInterface` and named by nobody, so dropping their
@@ -95,7 +109,7 @@ it rather than re-deriving it.
 
 | Module | C++ | Boundary |
 | --- | --- | --- |
-| `inputsystem` | 4,017 | **Measured:** `IInputSystem` has 52 virtual functions of its own beside `IAppSystem`'s 5, and the only types crossing are `ButtonCode_t` and `AnalogCode_t`, which are enums, and `InputEvent_t`, which is plain data — no containers, as with `soundemittersystem`. The work is not the boundary but what sits behind it: the module owns SDL2 event pumping, the button-code translation tables and joystick handling, and it links `SDL2` and `steam_api`. SDL is a third-party library that stays after the C++ engine is gone, so binding it is a real boundary rather than migration scaffolding. `steam_api` is Rust now, so that half of its link line is already done. |
+| ~~`inputsystem`~~ | ~~4,017~~ | Done on 2026-09-21; see the row above and `docs/rust-port/inputsystem-boundary.md`. What the estimate below got right and wrong is at the end of this file. **Measured:** `IInputSystem` has 52 virtual functions of its own beside `IAppSystem`'s 5, and the only types crossing are `ButtonCode_t` and `AnalogCode_t`, which are enums, and `InputEvent_t`, which is plain data — no containers, as with `soundemittersystem`. The work is not the boundary but what sits behind it: the module owns SDL2 event pumping, the button-code translation tables and joystick handling, and it links `SDL2` and `steam_api`. SDL is a third-party library that stays after the C++ engine is gone, so binding it is a real boundary rather than migration scaffolding. `steam_api` is Rust now, so that half of its link line is already done. |
 | `vpklib` | 2,089 | A static library of C++ classes used directly by `filesystem`, not an interface; goes with the filesystem module. |
 | `datacache` | 5,376 | `IDataCache`/`IMDLCache` hand out `studiohdr_t` and vertex data pointers that the renderer and physics keep. |
 | `filesystem` | 8 files | `IFileSystem` declares 108 virtual functions of its own, beside `IAppSystem`'s 5 and `IBaseFileSystem`'s 17 (counted with the same clang dump), and passes `CUtlBuffer`; most of the behaviour behind it is already Rust, which makes it the first large module worth taking whole. It is also what would retire the one C++ call the two finished modules still make. |
@@ -126,3 +140,47 @@ passes is a much smaller thing than what its implementation uses, and only the
 interface has to be reproduced. `datacache` and `filesystem` are ranked last
 here because they are the ones whose interfaces really do hand out C++
 containers and raw structure pointers the engine then keeps.
+
+## What `inputsystem` actually cost
+
+The estimate above said the work was not the boundary but what sits behind it:
+SDL event pumping, the translation tables, joystick handling. Two of those
+three were wrong, and both in the same direction.
+
+**It does not pump SDL.** On this platform keyboard, mouse, focus and quit
+never come from SDL at all — they arrive as `CCocoaEvent`s from the launcher's
+`SDLMgrInterface001`, and `PollJoystick` is deliberately empty with a comment
+saying why. SDL carries game controllers and touch, through two *watches* the
+launcher's pump invokes. So the SDL surface is about twenty entry points, not
+the 124 distinct `SDL_*` symbols the module references, and the ownership
+hazard that looked worst — pumping in the wrong place — was never the module's
+to get wrong. What remained was to not introduce it: the state lock is dropped
+around the pump, because the watches re-enter the module from inside it.
+
+**Most of the Steam Controller file is dead here.** `steamcontroller.cpp` is
+695 lines, and all but two tables are behind `SteamControllerInterface()`,
+which returns null because `CSteamAPIContext::Init` fails at its first line
+against the `steam_api` stub this tree links. That is forced by the linked
+implementation rather than observed once, which is why no runtime trace was
+built for it. The two origin tables are ported whole because the UI reads them
+whether or not a controller is attached.
+
+**The tables were the work.** 635 button-code names, 10 analog names, a
+48-entry gamepad renaming, a 256-entry virtual-key table and its reverse, a
+128-entry scan-code table with its extended-bit fixups, a 256-entry SDL
+scancode keymap, and 43 Steam Controller keys. The general lesson from
+`soundemittersystem` held again — read the interface, not the implementation —
+but with a twist: here the interface *is* mostly tables, so the implementation
+was small and the transcription was the risk. Deriving the enum bounds from
+`MAX_JOYSTICKS`, `SK_MAX_KEYS` and friends rather than writing the numbers
+down is what makes a mistranscribed table a build failure instead of a wrong
+key binding.
+
+Known divergence, recorded rather than hidden: the C++ reads
+`joy_axisbutton_threshold`, `joy_axis_deadzone` and `joy_gamecontroller_config`
+as convars. Reading those needs the cvar interface, which is `vstdlib`, which
+is C++. The Rust module compiles the first two defaults in and does not pass
+the third to SDL at all, so a player who has changed either threshold, or who
+relies on a custom controller mapping set through that convar rather than
+through Steam, gets the default instead. Wiring `ICvar` in through the factory
+by vtable slot is the fix, and it is the next thing this module wants.

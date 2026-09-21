@@ -1,5 +1,21 @@
-//! Stateful normalization for SDL input passed through the transitional ABI.
+//! The input system's behaviour, with no FFI in it.
+//!
+//! [`codes`], [`keymap`], [`state`] and [`steam`] are what `inputsystem`'s
+//! five translation units do once the SDL, launcher and Steam calls are taken
+//! out: the button and analog code space and its tables, the SDL scancode
+//! keymap, the double-buffered input state, and the Steam Controller origin
+//! tables. `source-inputsystem` wraps them in the module's vtable and supplies
+//! those calls.
+//!
+//! [`State`] below predates that and belongs to the transitional ABI that
+//! `source-abi` still goes through.
 
+pub mod codes;
+pub mod keymap;
+pub mod state;
+pub mod steam;
+
+/// Stateful normalization for SDL input passed through the transitional ABI.
 pub const MOD_CAPS_LOCK: u32 = 1 << 0;
 pub const MOD_RIGHT_SHIFT: u32 = 1 << 1;
 pub const MOD_LEFT_SHIFT: u32 = 1 << 2;

@@ -466,6 +466,7 @@ def pinned_rust_channel(conf):
 # is what the project lists below hold; the library name is what other
 # subprojects put in their `use`, and what rust/wscript installs.
 RUST_MODULES = {
+	'inputsystem': 'inputsystem',
 	'scenefilecache': 'scenefilecache',
 	'soundemittersystem': 'soundemittersystem',
 	'stub_steam': 'steam_api',

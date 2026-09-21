@@ -148,6 +148,14 @@ name = "source-input"
 version = "0.1.0"
 
 [[package]]
+name = "source-inputsystem"
+version = "0.1.0"
+dependencies = [
+ "source-cppabi",
+ "source-input",
+]
+
+[[package]]
 name = "source-keyvalues"
 version = "0.1.0"
 

@@ -10,7 +10,7 @@ top = '.'
 # Library file names for the subprojects the top-level wscript drops for a Rust
 # build, which it does on macOS alone. Kept in step with its RUST_MODULES, whose
 # keys are directories; these are the names Cargo gives the libraries.
-RUST_MODULES = ['scenefilecache', 'soundemittersystem', 'steam_api']
+RUST_MODULES = ['inputsystem', 'scenefilecache', 'soundemittersystem', 'steam_api']
 
 # Modules other subprojects link rather than dlopen. `scenefilecache` and
 # `soundemittersystem` are found through CreateInterface and named by nobody, so

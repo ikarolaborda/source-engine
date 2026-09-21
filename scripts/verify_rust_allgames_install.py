@@ -11,7 +11,7 @@ GAMES = ("hl2", "hl2mp", "hl1", "hl1mp", "episodic", "portal", "cstrike", "dod")
 # Engine modules that are Rust alone. Waf never removes an installed file, so a
 # C++ build of the same name left behind by an earlier install would load
 # without complaint; each is checked for what it is, not only that it exists.
-RUST_MODULES = ("scenefilecache", "soundemittersystem")
+RUST_MODULES = ("inputsystem", "scenefilecache", "soundemittersystem")
 # A module may export one more symbol than its factory when the platform ABI
 # forces a hand-written thunk that the linker will not hide.
 RUST_MODULE_EXTRA_EXPORTS = {"soundemittersystem": {"_source_add_wave_name"}}

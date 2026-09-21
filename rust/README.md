@@ -891,3 +891,82 @@ tentative definition, and the gate writes through the imported symbol and reads
 it back to check it is storage rather than a value.
 
 To replace the next module: dump its interfaces' tables
+### `inputsystem`
+
+The fourth module, and the largest so far: five translation units and 3,880
+lines of C++ on macOS, behind `IInputSystem`'s 57 callable slots. It is the
+loadable shape again, like `scenefilecache` and `soundemittersystem` — nothing
+names it at link time — so the `RUST_MODULES` entry is one line and no
+`cargo_link_library` generator is needed. `rust/crates/source-input` holds the
+behaviour and `rust/crates/source-inputsystem` is the `cdylib`.
+`docs/rust-port/inputsystem-boundary.md` is the slot-by-slot ledger.
+
+Three measurements decided the design, and each contradicted what reading the
+module's file list suggests.
+
+**It does not own the SDL event pump.** Keyboard, mouse, focus and quit never
+come from SDL here. `Connect` takes `SDLMgrInterface001` from the factory, and
+`PollInputState` calls `ILauncherMgr::PumpWindowsMessageLoop()` and drains
+`GetEvents(CCocoaEvent[32], 32)`; `PollJoystick` is empty under `USE_SDL` with
+a comment saying why. SDL carries only game controllers and touch, through two
+*watches* the launcher's pump invokes synchronously. The port inherits that
+unchanged, which turns the ownership hazard into one concrete rule: the state
+lock is dropped around the pump, because the watches re-enter the module from
+inside it. The same rule `scenefilecache` learned about the factory sweep.
+
+**SDL is resolved, not linked.** `dlsym` against `RTLD_DEFAULT` finds the copy
+the process already loaded, so sharing the launcher's SDL is structural rather
+than something a link line has to be trusted for, and there is no build script
+and no link path to keep in step. The module test asserts the built library
+imports no `SDL_` symbol at all, which is what makes that check real. The
+`SDL_Event` union is read by measured offset — `offsetof` against the headers
+this tree builds with, Homebrew's `sdl2-compat` — rather than by redeclaring
+arms that would have to be kept in step.
+
+**The Steam Controller half is inert by construction.** `CInputSystem::Init`
+reaches Steam only past `if ( m_SteamAPIContext.SteamController() )`, and
+`CSteamAPIContext::Init` opens with `if ( !SteamClient() ) return false;`
+against a `steam_api` whose `SteamClient()` returns null — the Rust stub now,
+the C++ one before it. So `SteamControllerInterface()` returns null and the
+Steam slots answer what the C++ answers with a null pointer. That is the
+linked implementation forcing the result, not one observation of it, which is
+why no runtime trace was built to establish it. The two origin tables are the
+exception and are ported whole: the UI reads them whether or not a controller
+is attached.
+
+The work turned out to be the tables — 635 button-code names, 10 analog names,
+a 48-entry gamepad renaming, a 256-entry virtual-key table and its reverse, a
+128-entry scan-code table with its extended-bit fixups, a 256-entry SDL
+scancode keymap, 43 Steam Controller keys. The interface is mostly tables, so
+transcription was the risk rather than logic. The enum bounds are therefore
+derived from `MAX_JOYSTICKS`, `SK_MAX_KEYS` and the rest rather than written
+down, and the two length assertions the C++ makes at compile time are
+reproduced, so a table of the wrong length fails to build rather than
+mis-binding a key.
+
+This is the first module whose gate is Rust rather than a C++ oracle:
+
+```sh
+cargo test -p source-input -p source-inputsystem
+```
+
+`rust/crates/source-inputsystem/tests/module.rs` `dlopen`s the built library,
+takes its interface through `CreateInterface` and calls every slot **by index
+off the vtable**, which is the part nothing else covers — an entry in the
+wrong place reads a neighbouring function pointer and calls it with the wrong
+arguments. It also asserts the export set is `_CreateInterface` alone and that
+nothing imports the C++ runtime or SDL. Be clear about what that is worth
+against the three gates above: those compare with the C++ module's own
+answers, and this compares with what the port was written to produce. The
+derived enum arithmetic is what makes it tolerable. What it does not cover at
+all — the polling loop against a real launcher, the watches against a real
+device — is a play test.
+
+One divergence, recorded rather than hidden: the C++ reads
+`joy_axisbutton_threshold`, `joy_axis_deadzone` and `joy_gamecontroller_config`
+as convars, which needs the cvar interface, which is `vstdlib`, which is C++.
+The Rust module compiles the first two defaults in and does not pass the third
+to SDL, so a player who changed either threshold, or who relies on a controller
+mapping set through that convar rather than through Steam, gets the default.
+Reaching `ICvar` through the factory by vtable slot is the fix and is what this
+module wants next.
