@@ -110,12 +110,54 @@ it rather than re-deriving it.
 | Module | C++ | Boundary |
 | --- | --- | --- |
 | ~~`inputsystem`~~ | ~~4,017~~ | Done on 2026-09-21; see the row above and `docs/rust-port/inputsystem-boundary.md`. What the estimate below got right and wrong is at the end of this file. **Measured:** `IInputSystem` has 52 virtual functions of its own beside `IAppSystem`'s 5, and the only types crossing are `ButtonCode_t` and `AnalogCode_t`, which are enums, and `InputEvent_t`, which is plain data — no containers, as with `soundemittersystem`. The work is not the boundary but what sits behind it: the module owns SDL2 event pumping, the button-code translation tables and joystick handling, and it links `SDL2` and `steam_api`. SDL is a third-party library that stays after the C++ engine is gone, so binding it is a real boundary rather than migration scaffolding. `steam_api` is Rust now, so that half of its link line is already done. |
-| `vpklib` | 2,089 | A static library of C++ classes used directly by `filesystem`, not an interface; goes with the filesystem module. |
-| `datacache` | 5,376 | `IDataCache`/`IMDLCache` hand out `studiohdr_t` and vertex data pointers that the renderer and physics keep. |
-| `filesystem` | 8 files | `IFileSystem` declares 108 virtual functions of its own, beside `IAppSystem`'s 5 and `IBaseFileSystem`'s 17 (counted with the same clang dump), and passes `CUtlBuffer`; most of the behaviour behind it is already Rust, which makes it the first large module worth taking whole. It is also what would retire the one C++ call the two finished modules still make. |
+| `vpklib` | 2,089, 2 TUs | **Measured 2026-09-22:** not independently portable, and not only by `filesystem`. It is named in the `use` lists of *both* `filesystem/wscript` and `dedicated/wscript`, so it is a link-time dependency of two subprojects and goes wherever `filesystem` goes. |
+| `datacache` | 5,376, 6 TUs | **Measured 2026-09-22.** Loadable — named in no other subproject's `use` list. Two interfaces, `VDataCache003` and `MDLCache004`, and 92 callable slots between them and the two objects they hand out: `IDataCache` 15, `IDataCacheSection` 30, `IMDLCache` 45, `IMDLCacheNotify` 2 (that last one the engine implements and this module calls). See below: the line count is the smallest left, and the boundary is the hardest yet. |
+| `filesystem` | 15,537, 9 TUs | **Measured 2026-09-22**, and three times the size the earlier "8 files" note implied. Loadable. `IFileSystem` is 134 vtable entries (132 callable) and `IBaseFileSystem` 19 (17), and `vpklib` comes with it. Most of the behaviour behind it is already Rust, and it is what would retire the one C++ call the finished modules still make. |
 
-Next: `inputsystem`, the first port that removes a four-figure number of lines
-and the first to bind a library that is meant to stay.
+## What to take next, and why the line count is the wrong sort
+
+`vpklib` cannot go alone, so the choice is `datacache` or `filesystem`.
+`datacache` is a third the size. It is also, measured rather than guessed, the
+harder of the two, and the reason is worth writing down because it is the first
+boundary in this project that is not about *values*.
+
+Everything ported so far passes things across: `scenefilecache` passes bytes and
+a handful of ints, `soundemittersystem` passes flat structs and a symbol that is
+an index, `steam_api` passes nothing at all, `inputsystem` passes enums and five
+ints. The one interior pointer any of them hands out — `GetEventData` — is valid
+for exactly one frame, and a double buffer covers it.
+
+`datacache` hands out *memory the engine keeps and dereferences for as long as
+it likes*, under a protocol:
+
+| Slot | Hands out | Governed by |
+| --- | --- | --- |
+| `IMDLCache::GetStudioHdr` | `studiohdr_t *` | `LockStudioHdr` / `UnlockStudioHdr` |
+| `IMDLCache::GetVertexData` | `vertexFileHeader_t *` | `BeginLock` / `EndLock` |
+| `IMDLCache::GetVirtualModel` | `virtualmodel_t *` | same |
+| `IDataCacheSection::Lock` / `Get` | `void *` into the cache | a refcount per handle |
+| `IMDLCache::GetFrameUnlockCounterPtr` | **`int *` into the module's own state** | nothing — the caller polls it every frame |
+
+That last row is the one to design around. The engine does not ask the module
+for a number; it takes a pointer to the module's counter and reads it directly
+on every frame. A Rust module that owns that integer has to keep it at a fixed
+address for the life of the module and accept that something else reads it
+without telling anyone.
+
+So the ordering advice this file gave — smallest boundary first, by line count —
+is wrong here, and the measurement is what shows it. `filesystem` is three times
+the lines and 132 slots, but its boundary is the *kind* already done four times:
+paths, bytes, handles, and `CUtlBuffer`. `datacache` is a smaller module with a
+boundary this project has never crossed. The honest ordering is by what the
+interface passes, not by how much code sits behind it:
+
+1. **`filesystem`** — large, but the same kind of work, and it retires the last
+   C++ call the finished modules make. `vpklib` comes with it.
+2. **`datacache`** — smaller, but needs a shared-memory ownership design first,
+   and that design should be reviewed before any of it is written.
+
+Neither is an afternoon. Both are bigger than `inputsystem`, which was itself
+the largest so far.
 
 What `stub_steam` actually cost, against the estimate above that called it an
 afternoon and a link-and-call check: the forty-five stubs were half an hour and
