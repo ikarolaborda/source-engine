@@ -989,3 +989,92 @@ convar's name back out at the offset it expects and comparing it with the name
 it asked for. A layout that moves fails one lookup with one warning and falls
 back to the compiled defaults rather than returning a float from the middle of
 some other field.
+
+## The two renderers, measured
+
+This build ships both shader APIs: `shaderapidx9` over `togl`, which is the
+OpenGL path the C++ engine has always used on macOS, and `shaderapimetal` over
+`tometal` and `source-d3d9`, which is the Rust one. `-metal` picks the second.
+Everything else — the same build, the same content, the same launcher, the same
+machine — is held constant, so the difference below is the renderer and nothing
+else.
+
+Two maps, loaded fresh with `+map` at `-fullscreen -nativeres` on a 3024×1964
+display.
+
+### Ravenholm, `d1_town_02a`
+
+| OpenGL (`togl`) | Metal (`tometal`) |
+| --- | --- |
+| ![Ravenholm on OpenGL](../docs/rust-port/images/ravenholm-gl.png) | ![Ravenholm on Metal](../docs/rust-port/images/ravenholm-metal.png) |
+
+### Canals, `d1_canals_05`
+
+| OpenGL (`togl`) | Metal (`tometal`) |
+| --- | --- |
+| ![Canals on OpenGL](../docs/rust-port/images/canals-gl.png) | ![Canals on Metal](../docs/rust-port/images/canals-metal.png) |
+
+### What actually differs
+
+The pair above is scaled down to fit; these crops are **1:1, straight out of
+the framebuffer**. Chain-link is the fairest subject there is for this, because
+fine repeating geometry is the first thing a half-resolution render loses.
+
+| OpenGL (`togl`) | Metal (`tometal`) |
+| --- | --- |
+| ![Fence on OpenGL](../docs/rust-port/images/crop-fence-gl.png) | ![Fence on Metal](../docs/rust-port/images/crop-fence-metal.png) |
+| ![Rock on OpenGL](../docs/rust-port/images/crop-rock-gl.png) | ![Rock on Metal](../docs/rust-port/images/crop-rock-metal.png) |
+
+**The Metal path renders at the display's real pixel count; the OpenGL path
+renders at half in each axis and doubles it.** That is four times the pixels,
+and it is measured rather than eyeballed. In each frame, take the absolute
+luma difference between horizontally adjacent pixels *within* a 2×2 block and
+compare it with the difference *between* blocks. A genuine per-pixel render
+gives a ratio near 1. A 2× nearest-neighbour upscale gives 0, because the two
+pixels in each pair are the same pixel.
+
+| Frame | within-pair | pair-to-pair | ratio | mean luma |
+| --- | --- | --- | --- | --- |
+| Ravenholm, Metal | 2.943 | 2.942 | **1.00** | 17.09 |
+| Ravenholm, OpenGL | 0.001 | 2.476 | **0.00** | 17.22 |
+| Canals, Metal | 6.518 | 6.522 | **1.00** | 29.14 |
+| Canals, OpenGL | 0.002 | 5.154 | **0.00** | 30.22 |
+
+The Metal device says the same thing from the other side, in the log:
+`tometal: creating device, back buffer 3024x1900` and `d3d9metal: drawable
+3024x1898 at scale 2`. The OpenGL path logs no back-buffer size at all, and the
+frames say why: it never had one at that size.
+
+The `pair-to-pair` column is the second half of the same story. Even comparing
+block to block — the resolution the OpenGL path *does* render at — it carries
+16% less detail in Ravenholm and 21% less in the canals. That is the
+high-frequency detail that was never drawn, not just softness from the upscale.
+
+### What is the same, which matters as much
+
+Mean luma agrees to within 1% in Ravenholm and 4% in the canals. The Metal
+path reproduces the image rather than restyling it: no shifted gamma, no
+changed contrast curve, no "improved" colour. For a renderer port that is the
+result to want, and it is worth stating as plainly as the sharpness win —
+a port that looked *different* would be a port that was wrong.
+
+### What this comparison does not show
+
+- **Nothing here is a frame rate.** The two paths were not timed, and no claim
+  about performance is made from these images.
+- The two captures of each map are **separate live sessions**, so the view
+  differs by a degree or two — the engine was running, not paused. The
+  sharpness result does not depend on that: every measurement above is a
+  property of one image's own pixel structure, not of the two being aligned.
+- One display, one machine, one macOS version, two maps.
+- Whether the OpenGL path *could* be made to render at native resolution is
+  not examined here. This compares the two paths as this build ships them.
+
+Reproduce it by running the same map twice, once with `-metal` and once
+without, and capturing each:
+
+```sh
+cd "<runtime folder>"
+export DYLD_LIBRARY_PATH="$PWD/bin"
+./hl2_launcher -game hl2 -metal -fullscreen -nativeres +map d1_canals_05
+```
